@@ -9,6 +9,7 @@ test_smoke.py instead.
 
 import json
 import os
+import subprocess
 import time
 
 import pytest
@@ -115,17 +116,64 @@ def test_find_newest_conv_after_skips_dirs_older_than_start(brain_dir):
 # --------------------------------------------------------------------------
 
 
-def _entry(type_, content=None, status="DONE", source="MODEL"):
+def _entry(type_, content=None, status="DONE", source="MODEL", tool_calls=None):
     e = {"source": source, "status": status, "type": type_}
     if content is not None:
         e["content"] = content
+    if tool_calls is not None:
+        e["tool_calls"] = tool_calls
     return json.dumps(e)
 
 
 def _write_transcript(brain_dir, conv_id, lines):
     logs = brain_dir / conv_id / ".system_generated" / "logs"
-    logs.mkdir(parents=True)
-    (logs / "transcript.jsonl").write_text("\n".join(lines), encoding="utf-8")
+    logs.mkdir(parents=True, exist_ok=True)
+    path = logs / "transcript.jsonl"
+    path.write_text("\n".join(lines), encoding="utf-8")
+    return path
+
+
+def _view_file_call(path, start=None, end=None):
+    args = {
+        "AbsolutePath": f'"{path}"',
+        "toolAction": '"Viewing file"',
+        "toolSummary": '"View file"',
+    }
+    if start is not None:
+        args["StartLine"] = str(start)
+    if end is not None:
+        args["EndLine"] = str(end)
+    return [{"name": "view_file", "args": args}]
+
+
+def _fixture_content_only():
+    return [
+        _entry("USER_INPUT", "hello", source="USER_EXPLICIT"),
+        _entry("CONVERSATION_HISTORY", source="SYSTEM"),
+        _entry("PLANNER_RESPONSE", "plain answer"),
+    ]
+
+
+def _fixture_tool_then_content():
+    return [
+        _entry("USER_INPUT", "search then answer", source="USER_EXPLICIT"),
+        _entry("CONVERSATION_HISTORY", source="SYSTEM"),
+        _entry(
+            "PLANNER_RESPONSE",
+            tool_calls=[{"name": "grep_search", "args": {"Query": '"pm.py"'}}],
+        ),
+        _entry("GREP_SEARCH", "No results found"),
+        _entry("CHECKPOINT", "truncated"),
+        _entry("PLANNER_RESPONSE", "final after tool"),
+    ]
+
+
+def _fixture_tool_only_terminal(path="/Users/zvisegal/devlope/TaideAi/src/taide/v2/pm.py"):
+    return [
+        _entry("USER_INPUT", "read the file", source="USER_EXPLICIT"),
+        _entry("CONVERSATION_HISTORY", source="SYSTEM"),
+        _entry("PLANNER_RESPONSE", tool_calls=_view_file_call(path, start=1, end=800)),
+    ]
 
 
 def test_read_response_returns_last_planner_response_with_content(brain_dir):
@@ -179,6 +227,351 @@ def test_read_response_missing_transcript_with_db_points_at_db(brain_dir):
     (conv_dir / "conversation.db").write_text("", encoding="utf-8")
     with pytest.raises(RuntimeError, match=r"conversation\.db"):
         server._read_response("c5")
+
+
+# --------------------------------------------------------------------------
+# transcript parser — three real-world shapes
+# --------------------------------------------------------------------------
+
+
+def test_parse_content_only_fixture(brain_dir):
+    path = _write_transcript(brain_dir, "shape-content", _fixture_content_only())
+    content, pending = server._parse_planner_transcript(path.read_text(encoding="utf-8"))
+    assert content == "plain answer"
+    assert pending == []
+    assert server._read_response("shape-content") == "plain answer"
+
+
+def test_parse_tool_call_then_content_fixture(brain_dir):
+    path = _write_transcript(brain_dir, "shape-tool-then", _fixture_tool_then_content())
+    content, pending = server._parse_planner_transcript(path.read_text(encoding="utf-8"))
+    assert content == "final after tool"
+    assert pending == []
+    assert server._read_response("shape-tool-then") == "final after tool"
+
+
+def test_parse_tool_call_only_terminal_fixture(brain_dir):
+    target = "/Users/zvisegal/devlope/TaideAi/src/taide/v2/pm.py"
+    path = _write_transcript(
+        brain_dir, "shape-tool-only", _fixture_tool_only_terminal(target)
+    )
+    content, pending = server._parse_planner_transcript(path.read_text(encoding="utf-8"))
+    assert content is None
+    assert pending and pending[0]["name"] == "view_file"
+    with pytest.raises(RuntimeError, match="unexecuted tool call") as exc:
+        server._read_response("shape-tool-only")
+    msg = str(exc.value)
+    assert "view_file" in msg
+    assert target in msg
+    assert "failed silently or timed out" not in msg
+
+
+def test_parse_does_not_return_earlier_content_when_terminal_is_tool_only():
+    lines = [
+        _entry("PLANNER_RESPONSE", "stale earlier answer"),
+        _entry("PLANNER_RESPONSE", tool_calls=_view_file_call("/tmp/x.py")),
+    ]
+    content, pending = server._parse_planner_transcript("\n".join(lines))
+    assert content is None
+    assert pending[0]["name"] == "view_file"
+
+
+def test_format_tool_call_strips_embedded_quotes_and_names_range():
+    tc = _view_file_call("/Users/zvisegal/devlope/TaideAi/src/taide/v2/pm.py", 1, 800)[0]
+    formatted = server._format_tool_call(tc)
+    assert formatted == (
+        "view_file /Users/zvisegal/devlope/TaideAi/src/taide/v2/pm.py lines 1-800"
+    )
+
+
+def test_soft_deny_excerpt_prefers_jetski_stderr():
+    stderr = (
+        'jetski: no output produced — a tool required the "read_file" permission '
+        "that headless mode cannot prompt for, so it was auto-denied. "
+        "Add an allow-rule under permissions.allow in settings.json "
+        "(e.g. read_file(<target>)). Alternatively, re-run with "
+        "--dangerously-skip-permissions to auto-approve all tools."
+    )
+    excerpt = server._soft_deny_excerpt(stderr)
+    assert excerpt is not None
+    assert "headless mode cannot prompt" in excerpt
+    assert server._is_print_mode_soft_deny(stderr)
+
+
+# --------------------------------------------------------------------------
+# _run_agy tool-loop
+# --------------------------------------------------------------------------
+
+
+def _ok_proc(args, stderr=""):
+    return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr=stderr)
+
+
+def test_run_agy_content_only_does_not_continue(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    ws = str(tmp_path)
+    last_conv_file.write_text(json.dumps({ws: "c-plain"}), encoding="utf-8")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        _write_transcript(brain_dir, "c-plain", _fixture_content_only())
+        return _ok_proc(args)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: "")
+
+    assert server._run_agy("hi", ws, continue_conv=False, timeout_s=30) == "plain answer"
+    assert len(calls) == 1
+    assert "--conversation" not in calls[0]
+    # P0: workspace must be passed via --add-dir (agy ignores cwd alone).
+    assert "--add-dir" in calls[0]
+    add_idx = calls[0].index("--add-dir")
+    assert calls[0][add_idx + 1] == os.path.abspath(ws)
+    assert "--dangerously-skip-permissions" not in calls[0]
+    assert "--sandbox" not in calls[0]
+
+
+def test_run_agy_stale_cli_log_does_not_block_continue(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    """A previous session's soft-deny in cli.log must not abort this run."""
+    ws = str(tmp_path)
+    last_conv_file.write_text(json.dumps({ws: "c-fresh"}), encoding="utf-8")
+    calls = []
+    stale_log = (
+        "Print mode: conversation=00000000-old-session, sending message\n"
+        'Print mode: soft-denying tool confirmation "ReadFile" at step 3\n'
+        "permission check failed for read_file \"/tmp/old.py\""
+    )
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            _write_transcript(brain_dir, "c-fresh", _fixture_tool_only_terminal())
+        else:
+            _write_transcript(brain_dir, "c-fresh", _fixture_tool_then_content())
+        return _ok_proc(args)  # this process stderr is clean
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: stale_log)
+
+    assert (
+        server._run_agy("read the file", ws, continue_conv=False, timeout_s=30)
+        == "final after tool"
+    )
+    assert len(calls) == 2
+
+
+def test_cli_log_for_conv_requires_this_conversation_id(monkeypatch):
+    monkeypatch.setattr(
+        server,
+        "_read_cli_log_text",
+        lambda: 'soft-denying tool confirmation "ReadFile" conv=other-id',
+    )
+    assert server._cli_log_for_conv("this-id") == ""
+    monkeypatch.setattr(
+        server,
+        "_read_cli_log_text",
+        lambda: "permission check failed for read_file x conv=this-id",
+    )
+    assert "this-id" in server._cli_log_for_conv("this-id")
+
+
+def test_run_agy_continues_tool_only_until_content(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    ws = str(tmp_path)
+    last_conv_file.write_text(json.dumps({ws: "c-loop"}), encoding="utf-8")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1:
+            _write_transcript(brain_dir, "c-loop", _fixture_tool_only_terminal())
+        else:
+            _write_transcript(brain_dir, "c-loop", _fixture_tool_then_content())
+        return _ok_proc(args)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: "")
+
+    assert (
+        server._run_agy("read the file", ws, continue_conv=False, timeout_s=30)
+        == "final after tool"
+    )
+    assert len(calls) == 2
+    assert "--conversation" in calls[1]
+    assert "c-loop" in calls[1]
+    assert server._TOOL_CONTINUE_PROMPT in calls[1]
+
+
+def test_run_agy_soft_deny_does_not_continue(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    ws = str(tmp_path)
+    last_conv_file.write_text(json.dumps({ws: "c-deny"}), encoding="utf-8")
+    calls = []
+    stderr = (
+        'jetski: no output produced — a tool required the "read_file" permission '
+        "that headless mode cannot prompt for, so it was auto-denied."
+    )
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        _write_transcript(brain_dir, "c-deny", _fixture_tool_only_terminal())
+        return _ok_proc(args, stderr=stderr)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: "")
+
+    with pytest.raises(RuntimeError, match="unexecuted tool call") as exc:
+        server._run_agy("read pm.py", ws, continue_conv=False, timeout_s=30)
+    assert len(calls) == 1
+    msg = str(exc.value)
+    assert "view_file" in msg
+    assert "pm.py" in msg
+    assert "soft-deny" in msg.lower() or "headless mode cannot prompt" in msg
+    assert "failed silently or timed out" not in msg
+    assert "--dangerously-skip-permissions" not in calls[0]
+
+
+def test_run_agy_cli_log_soft_deny_empty_stderr_only_one_invocation(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    """Soft-deny only in this-conv cli.log must skip resumes (not burn 3*timeout)."""
+    ws = str(tmp_path)
+    conv_id = "c-log-deny"
+    last_conv_file.write_text(json.dumps({ws: conv_id}), encoding="utf-8")
+    calls = []
+    cli_log = (
+        f"Print mode: conversation={conv_id}, sending message\n"
+        'Print mode: soft-denying tool confirmation "ReadFile" at step 2\n'
+        'permission check failed for read_file "/tmp/x.py"'
+    )
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        _write_transcript(brain_dir, conv_id, _fixture_tool_only_terminal())
+        return _ok_proc(args, stderr="")  # deny is log-only
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: cli_log)
+
+    with pytest.raises(RuntimeError, match="unexecuted tool call") as exc:
+        server._run_agy("read the file", ws, continue_conv=False, timeout_s=30)
+    assert len(calls) == 1
+    msg = str(exc.value)
+    assert "view_file" in msg
+    assert "soft-deny" in msg.lower() or "permission check failed" in msg.lower()
+    assert "failed silently or timed out" not in msg
+    assert "did not advance" not in msg
+
+
+def test_run_agy_exhausts_continuations_then_names_tool(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    """Each resume advances the transcript but stays tool-only until the cap."""
+    ws = str(tmp_path)
+    last_conv_file.write_text(json.dumps({ws: "c-stuck"}), encoding="utf-8")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        n = len(calls)
+        # Grow transcript so the progress fingerprint changes, but keep a
+        # tool-only terminal planner (still pending after each resume).
+        lines = [
+            _entry("USER_INPUT", "read the file", source="USER_EXPLICIT"),
+            _entry("CONVERSATION_HISTORY", source="SYSTEM"),
+            *[_entry("CHECKPOINT", f"resume-step-{i}") for i in range(n)],
+            _entry(
+                "PLANNER_RESPONSE",
+                tool_calls=_view_file_call(
+                    "/Users/zvisegal/devlope/TaideAi/src/taide/v2/pm.py",
+                    start=1,
+                    end=800 + n,
+                ),
+            ),
+        ]
+        _write_transcript(brain_dir, "c-stuck", lines)
+        return _ok_proc(args)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: "")
+
+    with pytest.raises(RuntimeError, match="unexecuted tool call") as exc:
+        server._run_agy("read the file", ws, continue_conv=False, timeout_s=30)
+    assert len(calls) == 1 + server._MAX_TOOL_CONTINUATIONS
+    assert "view_file" in str(exc.value)
+    assert "failed silently or timed out" not in str(exc.value)
+    assert "did not advance" not in str(exc.value)
+
+
+def test_run_agy_stalled_transcript_fails_fast(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    """Identical transcript after resume must not claim 'unexecuted tool call'."""
+    ws = str(tmp_path)
+    last_conv_file.write_text(json.dumps({ws: "c-stall"}), encoding="utf-8")
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        # Same bytes every time — fingerprint does not advance.
+        _write_transcript(brain_dir, "c-stall", _fixture_tool_only_terminal())
+        return _ok_proc(args)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(server, "_read_cli_log_text", lambda: "")
+
+    with pytest.raises(RuntimeError, match="did not advance") as exc:
+        server._run_agy("read the file", ws, continue_conv=False, timeout_s=30)
+    assert len(calls) == 2  # initial + one resume, then fail fast
+    msg = str(exc.value)
+    assert "unexecuted tool call" not in msg
+    assert "c-stall" in msg
+
+
+def test_invoke_agy_raises_on_conversation_fork(
+    brain_dir, last_conv_file, tmp_path, monkeypatch
+):
+    """Pinned resume that records a new last_conversations id must not stick on pin."""
+    ws = str(tmp_path)
+    pin = "c-old-pin"
+    forked = "c-new-fork"
+    last_conv_file.write_text(json.dumps({ws: pin}), encoding="utf-8")
+    _write_transcript(brain_dir, pin, _fixture_tool_only_terminal())
+    _write_transcript(brain_dir, forked, _fixture_content_only())
+
+    def fake_run(args, **kwargs):
+        # Simulate agy writing a NEW conversation id for this workspace.
+        last_conv_file.write_text(json.dumps({ws: forked}), encoding="utf-8")
+        return _ok_proc(args)
+
+    monkeypatch.setattr(server.subprocess, "run", fake_run)
+    monkeypatch.setattr(server.time, "sleep", lambda _s: None)
+
+    with pytest.raises(RuntimeError, match="forked the conversation") as exc:
+        server._invoke_agy(
+            "continue",
+            ws,
+            30,
+            continue_conv=True,
+            pinned_conv=pin,
+        )
+    msg = str(exc.value)
+    assert pin in msg
+    assert forked in msg
+    assert "brain/" in msg or "Refusing" in msg
 
 
 # --------------------------------------------------------------------------
