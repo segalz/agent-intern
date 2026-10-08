@@ -70,7 +70,10 @@ def test_build_args_fresh_basic():
     assert args[args.index("-C") + 1] == "C:\\ws"
     assert "--skip-git-repo-check" in args
     assert args[args.index("-o") + 1] == "out.txt"
-    assert args[-1] == "hello"  # prompt is positional and last
+    # prompt goes in on stdin, never argv: cmd.exe (the codex.cmd shim) cuts an
+    # argument at its first newline
+    assert args[-1] == "-"
+    assert "hello" not in args
 
 
 def test_build_args_fresh_with_model():
@@ -88,9 +91,27 @@ def test_build_args_resume_omits_sandbox_and_cd():
     assert args[3] == SAMPLE_SID
     assert "-s" not in args
     assert "-C" not in args
-    assert "--skip-git-repo-check" not in args
+    assert "--skip-git-repo-check" in args  # else resume fails outside trusted dirs
     assert args[args.index("-o") + 1] == "o.txt"
-    assert args[-1] == "again"
+    assert args[-1] == "-"
+    assert "again" not in args
+
+
+def test_run_codex_sends_multiline_prompt_on_stdin(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        seen["input"] = kwargs.get("input")
+        Path(args[args.index("-o") + 1]).write_text("ok", encoding="utf-8")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(codex_bridge, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.setattr(codex_bridge.subprocess, "run", fake_run)
+    prompt = "line one\nline two\nLAST LINE"
+    assert codex_bridge.run_codex(prompt, str(tmp_path), "read-only", pin=False) == "ok"
+    assert seen["input"] == prompt
+    assert seen["args"][-1] == "-"
 
 
 def test_build_args_resume_with_model():
