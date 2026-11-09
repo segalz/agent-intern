@@ -1,0 +1,332 @@
+# Security
+
+<sub>[← back to the README](../README.md) · [all docs](README.md)</sub>
+
+What each backend's `sandbox` really enforces — read this before pointing a sub-agent at anything you don't trust.
+
+## Reporting a vulnerability
+
+Please **don't open a public issue** for a security problem. Use
+[**Report a vulnerability**](https://github.com/SinanTufekci/agent-intern/security/advisories/new) on
+the repository's Security tab instead: only the maintainer sees the report, and the fix can ship before
+the details are public. Include the bridge version (`*_status` prints it), your OS, the backend, and
+the smallest prompt or setup that reproduces it.
+
+Fixed vulnerabilities are published as
+[security advisories](https://github.com/SinanTufekci/agent-intern/security/advisories) once a release
+contains the fix — for example
+[GHSA-8m7x-pmcf-hcjq](https://github.com/SinanTufekci/agent-intern/security/advisories/GHSA-8m7x-pmcf-hcjq)
+(Windows command injection through the cursor/opencode `.cmd` shims, fixed in 0.30.3).
+
+<a id="security"></a>
+
+## ⚠️ Security
+
+All nine backends run the model as an **autonomous agent**. The difference is whether you get a real
+boundary: Codex enforces one everywhere and Grok on Linux/macOS only; Copilot, Cursor, opencode and
+Claude Code offer best-effort, agent-enforced ones (opencode's is the only one that behaves
+identically on every platform); Antigravity and Kimi offer none.
+
+### Antigravity — no usable boundary
+
+`agy -p` executes its own tools — reading and writing files, running shell commands, reaching
+the network — with **no approval gate**. Through agy 1.1.2 that was simply how print mode worked,
+with no opt-out at all. As of **1.1.3** it is a choice the bridge makes: agy finally gates headless
+tool calls, and the bridge deliberately opts out with `--dangerously-skip-permissions`, because a
+gated `-p` can do no useful work (it soft-denies even a plain file read, and print mode has no way
+to prompt). The posture below is therefore unchanged — assume every call runs arbitrary code with
+your privileges. The **one** exception is the opt-in `plan=True` described in the last bullet; it is
+a real restriction, but an agent-enforced one, so it does not change the default posture. Re-verified empirically on **agy 1.0.9 / Windows**, with the 1.1.3 amendment noted:
+
+- Print mode runs out-of-workspace file writes and live network fetches **even without**
+  `--dangerously-skip-permissions` — that flag was a **no-op** for `-p` through 1.1.2. As of 1.1.3
+  it is **load-bearing**: without it every tool-using call is soft-denied, and the bridge now always
+  passes it (it must precede `-p`, whose *value* is the prompt). There is still **no** agy flag that
+  makes print mode both safe and useful.
+- agy 1.0.5 integrated a permission system (its logs show `toolPermission=request-review`), but it
+  **still does not gate print-mode execution** — a fresh `-p` run created a file outside the
+  workspace with no prompt. agy 1.0.12 reshuffled how that permission config *merges* (per-project
+  files under `~/.gemini/config/projects/` now take precedence over
+  `~/.gemini/antigravity-cli/settings.json`), and 1.0.13 made "Always Approve" rule matching
+  strict (non-regex) by default with a `regex:` opt-in and relaxed its redirection checks — but
+  those are config/interactive-approval changes, they add no print-mode approval gate, and the
+  bridge reads none of it.
+- `--sandbox` is **not** a usable boundary. agy 1.0.6 fixed its propagation into `-p` (the 1.0.6/1.0.7
+  changelog calls this "sandbox isolation correctly enforced") and it now **does** block terminal/
+  shell command execution — but re-verified on 1.0.9 that it leaves the `write_to_file` tool and
+  network **wide open**: under `--sandbox` the model still wrote a file *outside* its workspace. agy
+  1.0.9 hardened the sandbox's *command* path (stricter exact-match command checks; `.git` added to
+  its dangerous-paths list), but none of that closes the out-of-workspace `write_to_file` hole. On
+  top of that, a `--sandbox` run whose blocked terminal command halts it writes **no JSONL
+  transcript** (only the SQLite `.db`, re-confirmed on 1.0.9). The bridge can now read that `.db`,
+  but still never passes `--sandbox` — it's no boundary, with file writes and network left open.
+- ✅ **`plan=True` is the first Antigravity restriction that actually holds** — opt-in, per call, on
+  `antigravity_ask` / `antigravity_continue`, and gated at agy **1.1.12** (older agy parses `--mode`
+  and ignores it in print mode, so the bridge **refuses** rather than handing back an unrestricted
+  run that reports success). It maps to agy's `--mode plan`: agy investigates and writes an
+  implementation plan into its own directory instead of touching yours. Verified on 1.1.20 through
+  the bridge's own code path, **with a control**: the identical prompt —
+  `cmd /c echo SHELLRAN > <absolute path>` — **executed and created the file** on a normal call, and
+  on `plan=True` created nothing at all, answering with a plan document. File reads still work, so
+  it is genuinely useful rather than merely inert. Note what it is **not**: it constrains agy's agent
+  loop, so it is agent-enforced like Copilot's and Cursor's modes, **not** an OS boundary — for that,
+  use Codex (with the Windows caveat in [Security](#security) firmly in mind). Two consequences worth knowing: it survives `--dangerously-skip-permissions` (which the
+  bridge still passes, because dropping it would soft-deny the reads plan mode exists to allow), and
+  it is **mutually exclusive with the slash-command shield** — agy silently disables plan mode when
+  `--disable-slash-commands` is present, so the bridge drops that flag and rejects a prompt whose
+  first token is a slash command instead.
+
+### Codex — a real sandbox you should use
+
+`codex exec` also has **no interactive approval gate**, but its `sandbox` flag is a genuine boundary
+that codex enforces:
+
+- **`read-only`** (default) — reads and answers; writes nothing. Safe for untrusted *questions* on
+  trusted content.
+- **`workspace-write`** — may edit files under the workspace. Opt in deliberately, per task.
+- **`danger-full-access`** — no sandbox at all. Avoid.
+
+Because there's no approval prompt, the flag you pass **is** the safety decision — choose it per
+call.
+
+> ⚠️ **On Windows, as of codex 0.149.1 and still on 0.162.1, that boundary is currently too tight to be useful — and it
+> fails silently.** Every command is refused under **both** `read-only` and `workspace-write` (down
+> to `pwd`) with `rejected: blocked by policy`: codex's policy engine can't classify the
+> `pwsh -Command <...>` wrapper codex itself builds. Shell commands are how codex reads files, so a
+> sandboxed run sees **nothing** of your workspace — and says nothing about it. Asked for the version
+> in a local `pyproject.toml` declaring `0.27.0`, it web-searched and answered **`1.2.0`** from an
+> unrelated GitHub repo; with the sandbox off, `0.27.0`. Exit 0 both times. Known upstream
+> ([#40060](https://github.com/openai/codex/issues/40060),
+> [#38886](https://github.com/openai/codex/issues/38886)). The bridge can't fix it, but it no longer
+> launders it: any answer whose run had commands refused comes back with a visible
+> `[agent-intern] WARNING` naming the count. Until it's fixed upstream, treat a sandboxed codex
+> answer on Windows as unsourced unless that warning is absent. This may share a cause with the
+> `workspace-write` downgrade described next: those runs probably had no Windows sandbox
+> configured either. Not yet checked with a real model run.
+
+> ⚠️ **On Windows, `workspace-write` runs read-only unless a Windows sandbox is configured.** On
+> codex-cli 0.166.0, `codex exec -s workspace-write` silently runs read-only until codex has a
+> Windows sandbox backend. Set it in `~/.codex/config.toml` (the same as passing
+> `-c windows.sandbox=...`):
+>
+> ```toml
+> [windows]
+> sandbox = "unelevated"   # or "elevated" or "mxc"
+> ```
+>
+> The bridge doesn't set it for you. When the sandbox codex reports differs from the one you asked
+> for, `codex_ask`, `codex_continue` (fresh runs) and codex swarm workers append an
+> `[agent-intern] WARNING: you asked for sandbox='workspace-write', but codex ran this under
+> sandbox='read-only'` note with this hint, and `codex_status` has a `windows sandbox` row on
+> Windows that shows `configured: <value>` or `not configured`. That row is information, never a
+> failure: `read-only` needs no setup. **Checked** on 0.166.0: what codex reports about its sandbox.
+> **Not checked:** an actual file write by a real model under the setting. This may be the same
+> cause as the "refuses every command" problem above: those runs probably had no Windows sandbox
+> configured either. Not yet checked with a real model run.
+
+### Copilot — best-effort, not an OS sandbox
+
+`copilot -p` runs headless with `--allow-all-tools` (required — otherwise it blocks on per-tool
+permission prompts). Its `sandbox` maps to copilot's tool/path permission flags, which are a
+**real-ish but not enforced** boundary:
+
+- **`read-only`** (default) — auto-approves tools to run headless, then **denies** the local `write`
+  and `shell` tools (`--deny-tool`). Blocks local file edits and command execution, but it is **not**
+  an OS sandbox: other tools (including network/MCP) can still act. Weaker than Codex's `read-only`.
+- **`workspace-write`** — writes allowed, but file access stays confined to the workspace (no
+  `--allow-all-paths`).
+- **`danger-full-access`** — `--allow-all` (tools + all paths + all URLs). Avoid.
+
+For a **hard** read-only boundary, prefer `codex_ask`.
+
+### Cursor — best-effort, agent-enforced
+
+`cursor-agent -p` runs headless with `--trust` (and `--force` when writes are allowed). Its `sandbox`
+maps to cursor's mode/force flags — an **agent-enforced**, not OS-level, boundary:
+
+- **`read-only`** (default) — `--mode ask`: the local `write` and `shell` tools are **unavailable**,
+  so cursor analyzes and answers but makes no edits (verified: it refuses to write files). Like
+  Copilot, this is agent-enforced and **not** an OS sandbox. Weaker than Codex's `read-only`.
+- **`workspace-write`** — `--force`: edits and commands allowed, file access rooted at `--workspace`.
+- **`danger-full-access`** — `--force --sandbox disabled` (OS sandbox off). Avoid.
+
+For a **hard** read-only boundary, prefer `codex_ask`.
+
+### Grok — real, but only on Linux and macOS
+
+`grok -p` runs headless with `--always-approve` (its headless mode does not auto-approve on its own,
+and nothing is there to answer a prompt). Its `sandbox` maps to grok's OS profile **plus** a tool
+allowlist:
+
+- **`read-only`** (default) — `--sandbox read-only` + `--tools read_file,list_dir,grep,glob,web_search,web_fetch`
+  + `--no-subagents`.
+- **`workspace-write`** — `--sandbox workspace`: writes confined to the workspace, `~/.grok`, temp.
+- **`danger-full-access`** — `--sandbox off`. Avoid.
+
+The profile is enforced by **Landlock (Linux ≥ 5.13)** and **Seatbelt (macOS)**. On **Windows there is
+no mechanism**, and per xAI's docs grok "logs a warning and continues without enforcement" — so on
+Windows the only thing standing between `read-only` and your disk is the agent-enforced tool
+allowlist. Treat Windows `read-only` as best-effort (Copilot/Cursor tier), not as a jail. The bridge
+uses an allowlist rather than a denylist so that a future grok with a new write tool fails safe; note
+that MCP meta-tools remain available under an allowlist regardless.
+
+⚠️ This backend is [unverified](backends.md#experimental-backends) — including these sandbox claims, which could
+not be exercised, because grok checks **auth before it validates `--sandbox`**.
+
+### opencode — agent-enforced, but the same everywhere
+
+`opencode run` maps its `sandbox` to an `OPENCODE_PERMISSION` policy. It is agent-enforced like
+Copilot's and Cursor's, with two properties that make it the strongest of that tier:
+
+- **A rule that would prompt is auto-rejected in headless mode**, so "ask" is effectively "deny" and
+  no call can hang on an invisible approval dialog.
+- **The policy is merged last**, overriding each agent's own rules — including opencode's `plan`
+  agent, which despite the name leaves `bash` allowed.
+
+Modes:
+
+- **`read-only`** (default) — `edit`, `task`, `external_directory`, `webfetch`, `websearch`
+  denied; `bash` set to ask, which a headless run rejects; read/search tools kept; `.env` files
+  denied. `bash` can't simply be denied: a denied tool is left out of the request, and opencode's
+  free tier refuses a request without `bash`.
+- **`workspace-write`** — edits and shell inside the run directory; `external_directory` denied.
+- **`danger-full-access`** — `--auto`, no policy. Avoid.
+
+Unlike Grok's, none of this depends on the OS — the same policy applies on Windows, macOS and Linux.
+Unlike Codex's, none of it is a kernel boundary: it is opencode refusing its own tool calls. A
+malformed policy is silently ignored by opencode, so the bridge always serializes it with `json.dumps`.
+
+#### opencode 2.x: `workspace-write` does not confine shell commands
+
+opencode 2.x (`npm i -g @opencode/cli`) is supported alongside 1.x. The bridge applies the same
+three modes through 2.x's permission rules: an ordered rule list in `OPENCODE_CONFIG_CONTENT`, plus
+`--standalone` on every run so the fence applies to a private server instead of being ignored by the
+shared background service. Your own `OPENCODE_CONFIG_CONTENT` is kept, but its permission keys are
+replaced while a run is fenced. Any other major version, or one the bridge can't read, is refused
+with a clear message rather than run unfenced.
+
+- **`read-only`** — no edits, no shell, no subagents, no web. Checked live: a shell write and an
+  edit write were both refused and no file was created.
+- **`workspace-write`** — edits and shell are allowed. **File edits stay inside the workspace**
+  (verified on 2.2.5 with the shell denied, so only the edit tool could write: an edit to
+  `sub/dir/nested.txt` inside the workspace was written, while `../x`, an absolute `C:/…` path and a
+  backslashed `C:\…` path outside were all refused with "Permission denied: external_directory").
+  **A shell command is not confined:** it can write anywhere your user can. A shell redirect into
+  the parent directory succeeded, because on 2.x denying `external_directory` doesn't stop it
+  (verified). There is no per-run warning for this; the `opencode_ask` tool description states it.
+  **That includes `.env` files:**
+  opencode's read tool is refused `.env` and `.env.local` (and allowed `.env.example` and other
+  files) in both modes, but in `workspace-write` a shell command can still read them. A
+  `.env.local` leaked that way once, probably through `cat`. The edit tool can also write a `.env`
+  file inside the workspace: the `.env` rules block reads only. On opencode 2.x, `workspace-write`
+  keeps file edits inside the workspace, but shell commands are not confined: they can write
+  anywhere your user can and read `.env` files. Only `read-only` protects them. Treat `workspace-write` on 2.x as "the agent may run any command", and use a container or VM
+  if that isn't acceptable.
+- **`danger-full-access`** — unchanged: no policy.
+
+**Checked** on opencode 2.2.5 / Windows with free models, through the bridge: `read-only`
+refusals, the shell write outside the workspace under `workspace-write`, edit-tool confinement
+under `workspace-write` (dated 2026-11-09), and the `.env` read rules.
+**Not checked on 2.x:** `--auto`, macOS and Linux, and a configured provider key. On 1.x, `workspace-write`
+still refuses reaching outside the workspace, as above; that has not been re-checked on 1.x
+recently.
+
+### Claude Code — agent-enforced, no shell in workspace-write
+
+The Claude Code backend (`claude_ask`, `claude_continue`) is for hosts other than Claude Code, and is
+hidden inside Claude Code itself. It runs `claude -p` and maps `sandbox` to Claude Code's own
+permission settings. **Every mode is enforced by Claude Code itself, and none is an OS boundary for
+file edits.** Claude Code's own OS sandbox covers shell commands only, and doesn't run on native
+Windows, so the bridge doesn't rely on it.
+
+- **`read-only`** (default) — reads and searches files: no Write, Edit or Bash, and no web. Checked
+  live on claude 2.1.319 / Windows: write and shell attempts did nothing.
+- **`workspace-write`** — file edits are confined to the workspace (checked live: an edit inside
+  was written, one outside was refused). It runs **no shell commands at all**, so it can't run tests
+  or builds; use `claude_continue` with a fix request instead of expecting a verify step.
+- **`danger-full-access`** — every permission check is skipped (`bypassPermissions`), and your own
+  Claude Code settings apply. **Not verified live.** Avoid.
+
+The bridge doesn't use `--bare`, because that mode ignores OAuth logins and would lock out anyone on
+a Claude plan. `claude_status` shows how you're signed in, but never your e-mail or organisation.
+
+### Kimi — no boundary at all
+
+`kimi -p` has **no sandbox and no `sandbox` argument**. Print mode auto-executes every tool call with
+no approval gate — the same posture as Antigravity, and verified live on 0.29.1 in the sense that `-p`
+*rejects* `--auto`/`--yolo` precisely because it is already self-approving. No flag makes it safe.
+Assume every `kimi_ask` runs arbitrary code with your privileges.
+
+### Muse — tools switched off, not sandboxed
+
+Muse has its own approval gate and an OS sandbox, both on by default. Headless runs can't answer
+approval prompts, so every mode disables approval; the containment comes from what is switched off:
+
+- **`read-only`** (default) — `--disable-write --disable-shell --disable-web-tools`. Nothing that could
+  write, run a command or reach the web is left, so this needs no OS sandbox and **holds on every
+  platform**. It is still agent-enforced — muse declining its own disabled tools — and MCP servers
+  configured in muse's own settings stay available.
+- **`workspace-write`** — shell commands run inside muse's OS sandbox (network `proxy-only`). On Windows
+  that sandbox needs a one-time elevated setup (`muse sandbox windows setup`; it creates local
+  `muse-sbx-*` accounts). `muse_status` shows its state. What an unprepared sandbox does to a headless
+  shell call is unverified — read-only never needs it.
+- **`danger-full-access`** — `--yolo`: no approval, no sandbox. Avoid.
+
+⚠️ This backend is [experimental](backends.md#experimental-backends): the real model has never
+answered through the bridge, so none of this has been observed under a real tool call.
+
+### Nesting limit
+
+An agent that agent-intern starts can load agent-intern too, if its own host config registers it,
+and that copy would then start another agent, and so on. Every agent agent-intern starts
+now gets `AGENT_INTERN_DEPTH` one higher than the server that started it, and a server at depth 2
+starts nothing and says so: host → agent → agent is as deep as it goes. A backend that loads
+agent-intern can therefore delegate **one level further, and no deeper**. The limit covers every
+backend, and `*_status` shows a `nesting` row when it is reached.
+
+### Windows: batch-file shims and the prompt
+
+On Windows several of these CLIs install as a `.cmd` shim (npm's `opencode.cmd`, the Cursor
+installer's `cursor-agent.CMD`). Windows cannot run a `.cmd` directly — it hands the whole command line
+to `cmd.exe`, which re-parses every argument with its own rules: `%var%` and `!var!` expansion, and
+`&`, `|`, `<`, `>` as command separators. Python quotes arguments for the C runtime, not for `cmd.exe`,
+so a prompt that closes a quote and continues with `& <command>` ran that command on the host —
+**before the agent started, so no `sandbox` setting applied**. The prompt can carry text Claude read
+from an untrusted file or page, which is what made this exploitable. Versions up to and including
+**0.30.2** were affected for the cursor and opencode backends on Windows; it was verified live
+against both real shims, and fixed in **0.30.3**:
+
+- **The shims are bypassed.** opencode's npm shim is resolved to the native `opencode.exe` it wraps,
+  and cursor is launched as the `node.exe index.js` its own launcher would pick. `cmd.exe` is no
+  longer involved, so the prompt reaches the CLI verbatim. Since 0.33.0 the same holds for an
+  npm-installed codex or copilot. Their shims run a node script that only finds and starts a
+  native binary, so the bridge starts that binary itself: codex's `codex.exe` from
+  `@openai/codex-win32-<arch>`, with the two update-hint variables its script sets, and
+  copilot's `copilot.exe` from `@github/copilot-win32-<arch>`.
+- **Anything still left is refused, not run.** Every spawn goes through one check: if the target is
+  a `.cmd`/`.bat` and an argument contains `" % ! ^ & | < >` or a newline, the call fails with an
+  error naming the backend's `*_BIN` override instead of running. A test fails the build if any
+  module spawns a process without that check.
+
+If a backend reports that refusal, point its `*_BIN` variable at the real executable rather than the
+shim.
+
+### What that means for you
+
+- The `workspace` argument is only a *starting context*, **not a security boundary** — Antigravity and
+  Kimi can and do act outside it; Codex is bounded by its enforced `sandbox`; Grok by its OS profile
+  on Linux/macOS and by a tool allowlist elsewhere; Copilot by its best-effort tool/path permissions;
+  Cursor by its agent-enforced mode/force; Claude Code by its own permission modes (`workspace-write`
+  confines file edits and runs no shell; none is an OS boundary); opencode by a permission policy that denies leaving the
+  run directory (on opencode 2.x it holds file edits inside the workspace, but doesn't stop shell
+  commands).
+- An Antigravity or Kimi call effectively runs **arbitrary code with your user privileges**. A Copilot
+  or Cursor call does too outside its best-effort denials; a Grok call does on Windows outside its
+  allowlist; a Codex call does unless you keep it at `read-only`.
+- Only invoke these with **trusted prompts on trusted content**. Untrusted input here is the classic
+  prompt-injection *lethal trifecta*: private-data access + code execution + network egress.
+- For real isolation, run the **whole bridge inside a container or VM**.
+
+The bridge itself does only cross-platform filesystem reads under `~/.gemini/antigravity-cli/`,
+`~/.codex/`, `~/.copilot/`, and `~/.cursor/` — no private APIs, no token theft. The risk above is
+entirely in what the sub-agents are allowed to do.

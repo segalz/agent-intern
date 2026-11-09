@@ -1,0 +1,51 @@
+---
+name: doctor
+description: Check which agent-intern backends (Antigravity, Codex, Copilot, Cursor, Claude Code, opencode, Grok, Kimi, Muse) are installed, signed in and ready, without spending any quota. Use when setting up agent-intern, when a delegation fails, or when the user asks which sub-agents they can use.
+allowed-tools:
+  - mcp__plugin_agent-intern_intern__antigravity_status
+  - mcp__plugin_agent-intern_intern__codex_status
+  - mcp__plugin_agent-intern_intern__copilot_status
+  - mcp__plugin_agent-intern_intern__cursor_status
+  - mcp__plugin_agent-intern_intern__claude_status
+  - mcp__plugin_agent-intern_intern__opencode_status
+  - mcp__plugin_agent-intern_intern__grok_status
+  - mcp__plugin_agent-intern_intern__kimi_status
+  - mcp__plugin_agent-intern_intern__muse_status
+---
+
+Call every agent-intern status tool you have in parallel. None of them spends quota. A backend turned
+off with `AGENT_INTERN_BACKENDS` has no status tool; the `backends` row of the others lists it.
+
+- `antigravity_status`
+- `codex_status`
+- `copilot_status`
+- `cursor_status`
+- `claude_status` (only if the user turned the Claude Code backend on; it is off by default here)
+- `opencode_status`
+- `grok_status`
+- `kimi_status`
+- `muse_status`
+
+Report one table with a row per backend and these columns: Backend, Ready, Version, Next step.
+
+- **Ready:**
+  - ✅ installed and signed in
+  - ⚠️ installed, but not signed in or misconfigured
+  - ❌ CLI not found
+  - ➖ turned off by `AGENT_INTERN_BACKENDS`. Leave its Next step empty.
+- **Next step:** the one thing to do, taken from that backend's status output, such as the login
+  command. Keep it under about 12 words, and leave it empty for a backend that's ready.
+
+After the table:
+
+- **A newer agent-intern release:** if any status output reports one, say so once and give the
+  upgrade command it names.
+- **An unknown name in `AGENT_INTERN_BACKENDS`:** if a `backends` row flags one, say so once and give
+  the valid names it lists.
+- **No backend ready:** recommend opencode. `npm i -g @opencode/cli` needs no account, and its free
+  models answer with zero credentials.
+- **Grok, Kimi and Muse:** mark them experimental, because no real model has ever answered through
+  them. If the user has one of those subscriptions, point them to
+  https://github.com/SinanTufekci/agent-intern/issues/new?template=backend_verification.yml.
+
+Don't call any `*_ask`, `*_continue` or image tool from this skill.

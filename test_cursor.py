@@ -82,7 +82,8 @@ def test_normalize_workspace_abspath(tmp_path):
 
 def test_build_args_fresh_basic():
     args = cursor_bridge.build_args("hello", "C:\\ws", "read-only", None, SAMPLE_CID)
-    assert args[0] == cursor_bridge.CURSOR_BIN
+    launch = cursor_bridge._launch()
+    assert args[: len(launch)] == launch  # the shim, or node+index.js behind it
     assert "-p" in args
     assert args[args.index("--output-format") + 1] == "text"  # default clean text
     assert "--trust" in args
@@ -245,7 +246,7 @@ def test_create_chat_parses_uuid(monkeypatch):
         stdout = f"{SAMPLE_CID}\n"
         stderr = ""
 
-    monkeypatch.setattr(cursor_bridge.subprocess, "run", lambda *a, **k: P())
+    monkeypatch.setattr(cursor_bridge.proc_tree, "run_captured", lambda *a, **k: P())
     assert cursor_bridge.create_chat("C:\\ws") == SAMPLE_CID
 
 
@@ -255,7 +256,7 @@ def test_create_chat_raises_without_id(monkeypatch):
         stdout = "no id here"
         stderr = ""
 
-    monkeypatch.setattr(cursor_bridge.subprocess, "run", lambda *a, **k: P())
+    monkeypatch.setattr(cursor_bridge.proc_tree, "run_captured", lambda *a, **k: P())
     with pytest.raises(RuntimeError):
         cursor_bridge.create_chat("C:\\ws")
 
@@ -280,7 +281,7 @@ def test_list_models_parses_ids(monkeypatch):
         stdout = _MODELS_OUT
         stderr = ""
 
-    monkeypatch.setattr(cursor_bridge.subprocess, "run", lambda *a, **k: P())
+    monkeypatch.setattr(cursor_bridge.proc_tree, "run_captured", lambda *a, **k: P())
     ids = cursor_bridge.list_models()
     assert "auto" in ids and "gpt-5.2" in ids and "sonnet-4-thinking" in ids
     assert "Available" not in ids  # header line skipped (no ' - ')
@@ -363,6 +364,7 @@ DOCUMENTED_CURSOR_MODELS = [
 ]
 
 
+@pytest.mark.real_cli
 def test_documented_cursor_models_still_accepted_by_live_cli(monkeypatch):
     monkeypatch.setattr(cursor_bridge, "_MODELS_CACHE", None)  # force a fresh read
     live = cursor_bridge.list_models()
@@ -422,7 +424,7 @@ def test_auth_status_logged_in(monkeypatch):
         stdout = "✓ Logged in as me@example.com\n"
         stderr = ""
 
-    monkeypatch.setattr(cursor_bridge.subprocess, "run", lambda *a, **k: P())
+    monkeypatch.setattr(cursor_bridge.proc_tree, "run_captured", lambda *a, **k: P())
     ok, detail = cursor_bridge.auth_status()
     assert ok is True
     assert "Logged in as me@example.com" in detail
@@ -435,9 +437,23 @@ def test_auth_status_not_logged_in(monkeypatch):
         stdout = "Not authenticated. Run cursor-agent login.\n"
         stderr = ""
 
-    monkeypatch.setattr(cursor_bridge.subprocess, "run", lambda *a, **k: P())
+    monkeypatch.setattr(cursor_bridge.proc_tree, "run_captured", lambda *a, **k: P())
     ok, _ = cursor_bridge.auth_status()
     assert ok is False
+
+
+def test_auth_status_flags_a_login_it_cannot_fetch_details_for(monkeypatch):
+    # The live output of 2026.08.11 with a stale login: it says "logged in"
+    # twice, yet every -p run fails with "Authentication required".
+    class P:
+        returncode = 0
+        stdout = "✓ Login successful!\nLogged in (unable to fetch user details)\n"
+        stderr = ""
+
+    monkeypatch.setattr(cursor_bridge.proc_tree, "run_captured", lambda *a, **k: P())
+    ok, detail = cursor_bridge.auth_status()
+    assert ok is False
+    assert "cursor-agent login" in detail
 
 
 def test_status_rows_cursor_missing(monkeypatch):
@@ -568,3 +584,79 @@ def test_run_cursor_streaming_completes_on_process_exit_not_stdout_eof(tmp_path,
     assert ans == "FAKE ANSWER"
     assert dt < 5.0, f"must return on process exit (~2s), not wait for the 8s child; took {dt:.1f}s"
     assert any(e.get("type") == "result" for e in events)
+
+
+# --------------------------------------------------------------------------
+# _launch_prefix — bypass the cmd.exe shim (command injection via the prompt)
+# --------------------------------------------------------------------------
+
+
+def _cursor_install(tmp_path, versions=(), flat=False):
+    shim = tmp_path / "cursor-agent.cmd"
+    shim.write_text("@echo off\r\n", encoding="ascii")
+    if flat:
+        (tmp_path / "node.exe").write_bytes(b"MZ")
+        (tmp_path / "index.js").write_text("", encoding="ascii")
+    for name in versions:
+        d = tmp_path / "versions" / name
+        d.mkdir(parents=True)
+        (d / "node.exe").write_bytes(b"MZ")
+        (d / "index.js").write_text("", encoding="ascii")
+    return str(shim)
+
+
+def test_launch_prefix_runs_node_from_the_newest_version_dir(tmp_path):
+    shim = _cursor_install(tmp_path, ("2026.07.23-aaaaaaa", "2026.08.11-e8db854", "not-a-version"))
+    newest = tmp_path / "versions" / "2026.08.11-e8db854"
+    assert cursor_bridge._launch_prefix(shim, windows=True) == [
+        str(newest / "node.exe"),
+        str(newest / "index.js"),
+    ]
+
+
+def test_launch_prefix_prefers_a_flat_install_like_the_ps1_does(tmp_path):
+    shim = _cursor_install(tmp_path, ("2026.08.11-e8db854",), flat=True)
+    assert cursor_bridge._launch_prefix(shim, windows=True) == [
+        str(tmp_path / "node.exe"),
+        str(tmp_path / "index.js"),
+    ]
+
+
+def test_launch_prefix_falls_back_to_the_shim_it_cannot_resolve(tmp_path):
+    # proc_tree.check_args then refuses a dangerous prompt instead of running it.
+    shim = _cursor_install(tmp_path)
+    assert cursor_bridge._launch_prefix(shim, windows=True) == [shim]
+
+
+def test_launch_prefix_leaves_real_executables_alone(tmp_path):
+    assert cursor_bridge._launch_prefix("/usr/local/bin/cursor-agent", windows=False) == [
+        "/usr/local/bin/cursor-agent"
+    ]
+
+
+def _git_bash_host_env(monkeypatch):
+    # What Claude Code on Windows hands the MCP server (issue #6).
+    monkeypatch.setenv("SHELL", r"C:\Program Files\Git\bin\bash.exe")
+    monkeypatch.setenv("MSYSTEM", "MINGW64")
+    monkeypatch.setenv("EXEPATH", r"C:\Program Files\Git\bin")
+    monkeypatch.setenv("AGENT_INTERN_TEST_KEEP", "1")
+
+
+def test_env_drops_the_git_bash_markers_cursor_picks_its_shell_from(monkeypatch):
+    # Any one of these makes cursor-agent run its Shell tool and hooks in Git Bash
+    # while it writes PowerShell, so every shell step fails.
+    _git_bash_host_env(monkeypatch)
+    env = cursor_bridge._env()
+    for key in ("SHELL", "MSYSTEM", "EXEPATH"):
+        assert key not in env
+    assert env["AGENT_INTERN_TEST_KEEP"] == "1"
+    assert env["CURSOR_INVOKED_AS"]
+    # A copy: the server's own environment keeps them.
+    assert os.environ["SHELL"] == r"C:\Program Files\Git\bin\bash.exe"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the env override is Windows-only")
+def test_windows_spawn_kwargs_launch_cursor_without_the_git_bash_markers(monkeypatch):
+    _git_bash_host_env(monkeypatch)
+    env = cursor_bridge._spawn_kwargs()["env"]
+    assert not {"SHELL", "MSYSTEM", "EXEPATH"} & env.keys()

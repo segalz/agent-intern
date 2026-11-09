@@ -6,6 +6,7 @@ AI Pro quota. The live parallel round-trip is in test_smoke.py.
     pytest test_swarm.py
 """
 
+import io
 import os
 
 import pytest
@@ -26,8 +27,14 @@ def _pin_isolation_ok():
     it explicitly.
     """
     swarm._ISOLATION_OK = True
+    # A worker that fails with a quota error reads agy's `/usage` (server's quota
+    # note). Pin that probe OFF and the shared report empty, so no test spawns it.
+    server._AGY_USAGE_GATE = False
+    server._QUOTA_REPORT_CACHE = None
     yield
     swarm._ISOLATION_OK = None
+    server._AGY_USAGE_GATE = None
+    server._QUOTA_REPORT_CACHE = None
 
 
 # --------------------------------------------------------------------------
@@ -253,6 +260,18 @@ def test_dashboard_is_live_reflects_recent_poll(monkeypatch):
     assert swarm_watch._dashboard_is_live() is True
 
 
+@pytest.mark.parametrize("live", [False, True])
+def test_open_window_keeps_stdout_clean(monkeypatch, capsys, live):
+    # stdout is the MCP JSON-RPC stream, so a stray line there lands in the protocol.
+    # Both paths (new window, reused dashboard) must stay off it.
+    monkeypatch.setattr(swarm_watch, "_port", lambda: 8765)
+    monkeypatch.setattr(swarm_watch, "_launch", lambda *a, **k: None)
+    monkeypatch.setattr(swarm_watch, "_dashboard_is_live", lambda: live)
+    monkeypatch.delenv("AGY_WATCH_ALWAYS_NEW", raising=False)
+    swarm_watch.open_window(3)
+    assert capsys.readouterr().out == ""
+
+
 # --------------------------------------------------------------------------
 # unified agent swarm: _normalize_tasks / swarm_agents / format_agent_results
 # --------------------------------------------------------------------------
@@ -281,10 +300,10 @@ def test_normalize_tasks_codex_default_sandbox():
     assert out[0]["sandbox"] == codex_bridge.DEFAULT_SANDBOX
 
 
-def test_normalize_tasks_antigravity_honors_model_drops_sandbox(monkeypatch):
+def test_normalize_tasks_antigravity_keeps_model_and_full_access(monkeypatch):
+    """danger-full-access is agy's own posture said out loud: no plan mode."""
     import server
 
-    # agy has no sandbox (dropped), but --model now works in print mode (1.0.16).
     monkeypatch.setattr(server, "list_agy_models", lambda: ["gemini-3.1-pro-high"])
     out = swarm._normalize_tasks(
         [
@@ -296,8 +315,72 @@ def test_normalize_tasks_antigravity_honors_model_drops_sandbox(monkeypatch):
             }
         ]
     )
-    assert out[0]["sandbox"] is None
+    assert out[0]["sandbox"] == "danger-full-access"
+    assert out[0]["plan"] is False
     assert out[0]["model"] == "gemini-3.1-pro-high"
+
+
+def test_normalize_tasks_antigravity_omitted_sandbox_stays_unrestricted(monkeypatch):
+    """The long-standing default is deliberately left alone: flipping it would turn
+    every existing file-writing swarm task into a plan document.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    out = swarm._normalize_tasks([{"backend": "antigravity", "prompt": "x"}])
+    assert out[0]["sandbox"] is None and out[0]["plan"] is False
+
+
+def test_normalize_tasks_antigravity_read_only_becomes_plan(monkeypatch):
+    """The footgun this closes: `sandbox: "read-only"` on an agy task used to be
+    silently ignored, so it ran completely unrestricted while reading as fenced.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", True)
+    out = swarm._normalize_tasks(
+        [{"backend": "antigravity", "prompt": "review this", "sandbox": "read-only"}]
+    )
+    assert out[0]["plan"] is True
+
+
+def test_normalize_tasks_antigravity_rejects_workspace_write(monkeypatch):
+    """agy has no write scoping to offer — under its own --sandbox it still wrote
+    outside the declared workspace — so accepting this would promise a fence that
+    does not exist.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    with pytest.raises(ValueError, match="task 0: antigravity cannot scope writes"):
+        swarm._normalize_tasks(
+            [{"backend": "antigravity", "prompt": "x", "sandbox": "workspace-write"}]
+        )
+
+
+def test_normalize_tasks_antigravity_plan_checked_before_any_worker_spawns(monkeypatch):
+    """Fail the whole swarm at normalization rather than N calls in: plan mode needs
+    the agy version gate AND the slash guard that replaces --disable-slash-commands.
+    """
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", True)
+    with pytest.raises(ValueError, match="task 0: plan mode cannot run a prompt"):
+        swarm._normalize_tasks(
+            [{"backend": "antigravity", "prompt": "/schedule nightly", "sandbox": "read-only"}]
+        )
+
+
+def test_normalize_tasks_antigravity_plan_refused_on_old_agy(monkeypatch):
+    import server
+
+    monkeypatch.setattr(server, "list_agy_models", lambda: [])
+    monkeypatch.setattr(server, "_AGY_PLAN_GATE", False)
+    monkeypatch.setattr(server, "_get_agy_version", lambda: "1.1.11")
+    with pytest.raises(ValueError, match="task 0: plan=True needs agy 1.1.12"):
+        swarm._normalize_tasks([{"backend": "antigravity", "prompt": "x", "sandbox": "read-only"}])
 
 
 def test_normalize_tasks_antigravity_rejects_unknown_model(monkeypatch):
@@ -336,7 +419,7 @@ def test_swarm_agents_dispatches_by_backend(monkeypatch):
     monkeypatch.setattr(server, "list_agy_models", lambda: ["M1"])
     calls = []
 
-    def fake_text(index, prompt, workspace, model, timeout_s):
+    def fake_text(index, prompt, workspace, model, timeout_s, plan=False):
         calls.append(("antigravity", index, prompt, model))
         return swarm.WorkerResult(index, True, answer="agy:" + prompt, workspace=workspace)
 
@@ -367,6 +450,42 @@ def test_swarm_agents_dispatches_by_backend(monkeypatch):
 
 def test_swarm_agents_empty_returns_empty():
     assert swarm.swarm_agents([]) == []
+
+
+def test_swarm_agents_fails_a_turned_off_backend_in_place(monkeypatch):
+    # AGENT_INTERN_BACKENDS left copilot off: its worker fails without launching
+    # anything, and the codex worker still answers, the way a preset with one
+    # member not installed still runs the rest.
+    monkeypatch.setattr(server, "ENABLED_BACKENDS", ("codex",))
+
+    def fake_codex(index, prompt, workspace, sandbox, model, timeout_s):
+        return swarm.WorkerResult(index, True, answer="cdx:" + prompt, workspace=workspace)
+
+    def no_copilot(*a, **k):
+        raise AssertionError("a turned-off backend must not be launched")
+
+    monkeypatch.setattr(swarm, "_run_codex_worker", fake_codex)
+    monkeypatch.setattr(swarm, "_run_copilot_worker", no_copilot)
+
+    results = swarm.swarm_agents(
+        [{"backend": "codex", "prompt": "p0"}, {"backend": "copilot", "prompt": "p1"}],
+        timeout_s=5,
+    )
+    results.sort(key=lambda r: r.index)
+    assert results[0].ok and results[0].answer == "cdx:p0"
+    assert not results[1].ok and results[1].backend == "copilot"
+    assert "'copilot' is turned off by AGENT_INTERN_BACKENDS (on: codex)" in results[1].error
+
+
+def test_swarm_agents_marks_a_turned_off_backend_failed_on_the_dashboard(monkeypatch):
+    # Without the worker_finish, its card would sit at "queued" forever.
+    monkeypatch.setattr(server, "ENABLED_BACKENDS", ("codex",))
+    monkeypatch.setattr(swarm_watch, "open_window", lambda n: None)
+
+    swarm.swarm_agents([{"backend": "copilot", "prompt": "p0"}], timeout_s=5, watch=True)
+    (worker,) = swarm_watch._snapshot()["workers"]
+    assert worker["status"] == "error"
+    assert "turned off by AGENT_INTERN_BACKENDS" in worker["answer"]
 
 
 def test_format_agent_results_tags_backend():
@@ -419,7 +538,7 @@ def test_run_text_worker_exit0_without_transcript_surfaces_stderr(monkeypatch, t
         stdout = ""
         stderr = denial
 
-    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Done())
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Done())
     # Fresh isolated HOME has no conversation, so _only_conv stays None and the
     # read loop runs to its deadline. Jump time.time() past the 5s deadline at once.
     times = iter([0.0] + [1e9 * i for i in range(1, 50)])
@@ -429,6 +548,137 @@ def test_run_text_worker_exit0_without_transcript_surfaces_stderr(monkeypatch, t
     res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
     assert res.ok is False
     assert "no readable transcript" in res.error and "auto-denied" in res.error
+
+
+_PRINT_TIMEOUT_STDERR = (
+    "[agy] print timeout after 10s with turn in progress; returning partial output"
+)
+# A partial ANSWER that happens to contain a sign-in marker: the timeout message
+# carries it, so it must never reach the auth-failure matcher.
+_PARTIAL_ANSWER = "To reset it, please sign in to the admin pan"
+
+
+def test_run_text_worker_print_timeout_fails_with_the_partial(monkeypatch, tmp_path):
+    """agy 1.2.0+ exits 0 when --print-timeout cuts a turn; the worker must fail."""
+
+    class _Cut:
+        returncode = 0
+        stdout = _PARTIAL_ANSWER
+        stderr = _PRINT_TIMEOUT_STDERR
+
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Cut())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
+    assert res.ok is False
+    assert "10s timeout" in res.error and _PARTIAL_ANSWER in res.error
+    assert swarm._ISOLATION_OK is True  # the answer's "please sign in" did not latch
+
+
+_PRINT_TIMEOUT_STDERR_EXIT3 = (
+    "[agy] print timeout after 5s with turn in progress; returning partial output\n"
+    'AGY_ERROR: {"status":"DEADLINE_EXCEEDED","reason":"print_timeout"}\n'
+)
+
+
+def test_run_text_worker_print_timeout_exit_3_fails_with_the_partial(monkeypatch, tmp_path):
+    """agy 1.5.0+ exits 3 on an expired --print-timeout: a failed result, not a raise."""
+
+    class _Cut:
+        returncode = 3
+        stdout = _PARTIAL_ANSWER
+        stderr = _PRINT_TIMEOUT_STDERR_EXIT3
+
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Cut())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 5)
+    assert res.ok is False
+    assert "5s timeout" in res.error and _PARTIAL_ANSWER in res.error
+    assert "agy exited" not in res.error
+    assert swarm._ISOLATION_OK is True  # the answer's "please sign in" did not latch
+
+
+def test_run_text_worker_exit_3_without_a_timeout_mark_stays_the_generic_error(
+    monkeypatch, tmp_path
+):
+    class _Fail:
+        returncode = 3
+        stdout = '{"status":"ERROR"}'
+        stderr = 'AGY_ERROR: {"status":"INTERNAL"}'
+
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Fail())
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 5)
+    assert res.ok is False
+    assert "agy exited 3" in res.error and "INTERNAL" in res.error
+    assert "hit its" not in res.error
+
+
+def test_run_text_worker_watched_print_timeout_exit_3_fails_with_the_partial(monkeypatch, tmp_path):
+    class _Popen:
+        returncode = 3
+
+        def __init__(self, *a, **k):
+            self.stdout = io.StringIO(_PARTIAL_ANSWER)
+            self.stderr = io.StringIO(_PRINT_TIMEOUT_STDERR_EXIT3)
+
+        def poll(self):
+            return 3
+
+    finished = []
+    monkeypatch.setattr(swarm.proc_tree, "popen", lambda *a, **k: _Popen())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
+    monkeypatch.setattr(swarm_watch, "worker_update", lambda i, **kw: None)
+    monkeypatch.setattr(
+        swarm_watch, "worker_finish", lambda i, s, a, e, **kw: finished.append((s, a))
+    )
+    res = swarm._run_text_worker_watched(0, "hi", str(tmp_path), None, 5)
+    assert res.ok is False
+    assert "5s timeout" in res.error and _PARTIAL_ANSWER in res.error
+    assert "agy exited" not in res.error
+    assert finished == [("error", res.error)]
+    assert swarm._ISOLATION_OK is True
+
+
+def test_run_text_worker_watched_exit_3_without_a_timeout_mark_stays_generic(monkeypatch, tmp_path):
+    class _Popen:
+        returncode = 3
+
+        def __init__(self, *a, **k):
+            self.stdout = io.StringIO('{"status":"ERROR"}')
+            self.stderr = io.StringIO('AGY_ERROR: {"status":"INTERNAL"}')
+
+        def poll(self):
+            return 3
+
+    monkeypatch.setattr(swarm.proc_tree, "popen", lambda *a, **k: _Popen())
+    monkeypatch.setattr(swarm_watch, "worker_update", lambda i, **kw: None)
+    monkeypatch.setattr(swarm_watch, "worker_finish", lambda *a, **kw: None)
+    res = swarm._run_text_worker_watched(0, "hi", str(tmp_path), None, 5)
+    assert res.ok is False
+    assert "agy exited 3" in res.error and "timeout" not in res.error
+
+
+def test_run_text_worker_watched_print_timeout_fails_with_the_partial(monkeypatch, tmp_path):
+    class _Popen:
+        returncode = 0
+
+        def __init__(self, *a, **k):
+            self.stdout = io.StringIO(_PARTIAL_ANSWER)
+            self.stderr = io.StringIO(_PRINT_TIMEOUT_STDERR)
+
+        def poll(self):
+            return 0
+
+    finished = []
+    monkeypatch.setattr(swarm.proc_tree, "popen", lambda *a, **k: _Popen())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
+    monkeypatch.setattr(swarm_watch, "worker_update", lambda i, **kw: None)
+    monkeypatch.setattr(
+        swarm_watch, "worker_finish", lambda i, s, a, e, **kw: finished.append((s, a))
+    )
+    res = swarm._run_text_worker_watched(0, "hi", str(tmp_path), None, 10)
+    assert res.ok is False and _PARTIAL_ANSWER in res.error
+    assert finished == [("error", res.error)]
+    assert swarm._ISOLATION_OK is True
 
 
 # --------------------------------------------------------------------------
@@ -492,21 +742,25 @@ def test_probe_skipped_where_home_cannot_hide_auth(monkeypatch):
     # Windows' credential store is HOME-independent, so the probe would burn
     # seconds per process on a question that cannot fail there.
     monkeypatch.setattr(swarm, "_credential_store_follows_home", lambda: False)
-    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(
+        swarm.proc_tree, "run_captured", lambda *a, **k: pytest.fail("must not spawn")
+    )
     assert swarm._probe_isolated_auth() is None
 
 
 def test_probe_none_when_agy_cannot_answer_usage(monkeypatch):
     monkeypatch.setattr(swarm, "_credential_store_follows_home", lambda: True)
     monkeypatch.setattr(server, "supports_print_usage", lambda: False)
-    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: pytest.fail("must not spawn"))
+    monkeypatch.setattr(
+        swarm.proc_tree, "run_captured", lambda *a, **k: pytest.fail("must not spawn")
+    )
     assert swarm._probe_isolated_auth() is None
 
 
 def _probe_env(monkeypatch, result):
     monkeypatch.setattr(swarm, "_credential_store_follows_home", lambda: True)
     monkeypatch.setattr(server, "supports_print_usage", lambda: True)
-    monkeypatch.setattr(swarm.subprocess, "run", result)
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", result)
 
 
 def test_probe_true_on_a_real_quota_table(monkeypatch):
@@ -554,8 +808,8 @@ def test_text_worker_uses_serialized_path_when_isolation_is_off(monkeypatch, tmp
     monkeypatch.setattr(swarm, "_make_isolated_home", lambda: pytest.fail("must not isolate"))
     seen = {}
 
-    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, pin=True):
-        seen.update(prompt=prompt, ws=ws, model=model, pin=pin)
+    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, plan=False, pin=True):
+        seen.update(prompt=prompt, ws=ws, model=model, plan=plan, pin=pin)
         return "serial answer"
 
     monkeypatch.setattr(server, "_run_agy", fake_run_agy)
@@ -573,12 +827,65 @@ def test_text_worker_retries_serialized_after_an_auth_failure(monkeypatch, tmp_p
         stdout = ""
         stderr = _AUTH_FAILURE_TEXT
 
-    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Failed())
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Failed())
     monkeypatch.setattr(server, "_run_agy", lambda *a, **k: "recovered")
     res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
     assert res.ok and res.answer == "recovered"
     # ...and the process latches serialized mode, so worker 2..N skip the failure.
     assert swarm._ISOLATION_OK is False
+
+
+def test_text_worker_plan_reaches_the_isolated_argv(monkeypatch, tmp_path):
+    """The parallel path builds its OWN argv rather than going through _run_agy, so
+    plan mode has to be threaded to it explicitly or a fenced task runs unfenced.
+    """
+    seen = {}
+
+    class _Failed:  # fail after argv capture; the read path is not what's under test
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    def fake_run(args, **kwargs):
+        seen["args"] = args
+        return _Failed()
+
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", fake_run)
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)  # the shield plan mode replaces
+    swarm._run_text_worker(0, "review this", str(tmp_path), None, 10, True)
+    argv = seen["args"]
+    assert argv[argv.index("--mode") + 1] == "plan"
+    assert "--disable-slash-commands" not in argv
+
+
+def test_text_worker_without_plan_keeps_the_slash_shield(monkeypatch, tmp_path):
+    seen = {}
+
+    class _Failed:
+        returncode = 1
+        stdout = ""
+        stderr = "boom"
+
+    monkeypatch.setattr(
+        swarm.proc_tree, "run_captured", lambda args, **k: (seen.update(args=args), _Failed())[1]
+    )
+    monkeypatch.setattr(server, "_AGY_SLASH_GATE", True)
+    swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
+    assert "--mode" not in seen["args"]
+    assert "--disable-slash-commands" in seen["args"]
+
+
+def test_text_worker_serialized_forwards_plan(monkeypatch, tmp_path):
+    """The macOS fallback path must carry the fence too, not just the isolated one."""
+    seen = {}
+
+    def fake_run_agy(prompt, ws, cont, timeout_s, model=None, plan=False, pin=True):
+        seen.update(plan=plan, pin=pin)
+        return "answer"
+
+    monkeypatch.setattr(server, "_run_agy", fake_run_agy)
+    res = swarm._run_text_worker_serialized(0, "hi", str(tmp_path), None, 10, 0.0, True)
+    assert res.ok and seen["plan"] is True and seen["pin"] is False
 
 
 def test_text_worker_does_not_retry_other_failures(monkeypatch, tmp_path):
@@ -587,11 +894,55 @@ def test_text_worker_does_not_retry_other_failures(monkeypatch, tmp_path):
         stdout = ""
         stderr = "agy exited 1: quota exhausted"
 
-    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Failed())
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Failed())
     monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
     res = swarm._run_text_worker(0, "hi", str(tmp_path), None, 10)
     assert res.ok is False and "quota exhausted" in res.error
     assert swarm._ISOLATION_OK is True  # unrelated failures don't latch
+
+
+# Issue #7, on the swarm's paths: agy's `/usage` with the Gemini 4 Argon family empty.
+_USAGE_ARGON_EMPTY = (
+    "Gemini Models\tWeekly Limit Remaining\t91%\t2026-11-09T13:12:12Z\n"
+    "Gemini 4 Argon\tGemini 4 Argon Weekly Limit\t0%\t2026-11-04T13:34:06Z\n"
+)
+
+
+@pytest.fixture
+def argon_empty(monkeypatch):
+    monkeypatch.setattr(server, "supports_print_usage", lambda: True)
+    monkeypatch.setattr(server, "_read_agy_usage", lambda: _USAGE_ARGON_EMPTY)
+    monkeypatch.setattr(
+        server, "list_agy_models", lambda: ["gemini-4-argon-high", "gemini-3.8-flash-high"]
+    )
+    monkeypatch.setattr(server, "_agy_settings_model", lambda: "Gemini 4 Argon (High)")
+
+
+class _QuotaFailed:
+    returncode = 1
+    stdout = ""
+    stderr = "Error: Individual quota reached, resets in ~75h\n"
+
+
+def test_text_worker_quota_failure_says_which_family_is_out(monkeypatch, tmp_path, argon_empty):
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _QuotaFailed())
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: pytest.fail("must not retry"))
+    res = swarm._run_text_worker(0, "hi", str(tmp_path), "gemini-4-argon-high", 10)
+    assert res.ok is False and "Individual quota reached" in res.error
+    assert "that family is out of quota" in res.error
+    assert 'model="gemini-3.8-flash-high"' in res.error
+    assert swarm._ISOLATION_OK is True  # a quota note must not read as an auth failure
+
+
+def test_image_worker_quota_failure_is_not_no_image_produced(monkeypatch, tmp_path, argon_empty):
+    # This path used to swallow every non-auth exit and fail with "no image file
+    # produced", which hides that the account is simply out of quota.
+    target = str(tmp_path / "out.png")
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _QuotaFailed())
+    res = swarm._run_image_worker(0, "draw", target, str(tmp_path), 10)
+    assert res.ok is False and "Individual quota reached" in res.error
+    assert "agy's default model (Gemini 4 Argon (High))" in res.error
+    assert swarm._ISOLATION_OK is True
 
 
 def test_image_worker_auth_failure_retries_serialized(monkeypatch, tmp_path):
@@ -601,7 +952,7 @@ def test_image_worker_auth_failure_retries_serialized(monkeypatch, tmp_path):
         stderr = _AUTH_FAILURE_TEXT
 
     target = str(tmp_path / "out.png")
-    monkeypatch.setattr(swarm.subprocess, "run", lambda *a, **k: _Failed())
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: _Failed())
     monkeypatch.setattr(server, "_run_agy", lambda *a, **k: "")
     monkeypatch.setattr(server, "_finalize_image", lambda t, txt, start: (target, "png", 123))
     res = swarm._run_image_worker(0, "draw", target, str(tmp_path), 10)
@@ -679,3 +1030,183 @@ def test_run_copilot_worker_never_pins(monkeypatch):
     r = swarm._run_copilot_worker(0, "hello", os.getcwd(), "read-only", None, 5)
     assert r.ok and r.answer == "ans:hello" and r.backend == "copilot"
     assert seen["pin"] is False
+
+
+# --------------------------------------------------------------------------
+# Image workers when agy cuts the turn at --print-timeout (exit 3 on 1.5.0+, exit 0
+# before): no image + the timeout mark = a timeout error, not "no image file found"
+# --------------------------------------------------------------------------
+
+_IMG_TIMEOUT_STDERR = (
+    "[agy] print timeout after 5s with turn in progress; returning partial output\n"
+    'AGY_ERROR: {"status":"DEADLINE_EXCEEDED","reason":"print_timeout"}\n'
+)
+
+
+def _png_at(path):
+    with open(path, "wb") as f:
+        f.write(_PNG_HEAD)
+    return str(path)
+
+
+def test_finalize_or_timeout_reports_the_timeout_when_no_image_was_produced(tmp_path):
+    with pytest.raises(RuntimeError) as exc:
+        swarm._finalize_or_timeout(
+            tmp_path, str(tmp_path / "nope.png"), None, 0.0, _IMG_TIMEOUT_STDERR, 5
+        )
+    msg = str(exc.value)
+    assert "agy hit its 5s timeout" in msg and "Raise timeout_s" in msg
+    assert msg.endswith(")") and "(" in msg  # the underlying "no image" error rides along
+
+
+def test_finalize_or_timeout_re_raises_the_original_without_the_mark(tmp_path):
+    target = str(tmp_path / "nope.png")
+    with pytest.raises(RuntimeError) as plain:
+        swarm._finalize_image_isolated(tmp_path, target, None, 0.0)
+    with pytest.raises(RuntimeError) as wrapped:
+        swarm._finalize_or_timeout(tmp_path, target, None, 0.0, "some other stderr", 5)
+    assert str(wrapped.value) == str(plain.value)
+    assert "hit its" not in str(wrapped.value)
+
+
+def test_finalize_or_timeout_returns_an_image_written_before_the_cut(tmp_path):
+    target = _png_at(tmp_path / "out.png")
+    final, fmt, size = swarm._finalize_or_timeout(
+        tmp_path, target, None, 0.0, _IMG_TIMEOUT_STDERR, 5
+    )
+    assert fmt == "PNG" and final.endswith(".png") and size > 0
+
+
+class _ImgRun:
+    def __init__(self, returncode, stderr, stdout=""):
+        self.returncode = returncode
+        self.stderr = stderr
+        self.stdout = stdout
+
+
+@pytest.mark.parametrize("returncode", [3, 0])
+def test_image_worker_no_image_after_a_print_timeout_says_timeout(
+    monkeypatch, tmp_path, returncode
+):
+    target = str(tmp_path / "out.png")
+    run = _ImgRun(returncode, _IMG_TIMEOUT_STDERR)
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: run)
+    res = swarm._run_image_worker(0, "draw", target, str(tmp_path), 5)
+    assert res.ok is False
+    assert "agy hit its 5s timeout" in res.error and "Raise timeout_s" in res.error
+    assert swarm._ISOLATION_OK is True  # a timeout is not a sign-in failure
+
+
+@pytest.mark.parametrize("returncode", [3, 0])
+def test_image_worker_keeps_an_image_written_before_the_cut(monkeypatch, tmp_path, returncode):
+    target = _png_at(tmp_path / "out.png")
+    run = _ImgRun(returncode, _IMG_TIMEOUT_STDERR)
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: run)
+    res = swarm._run_image_worker(0, "draw", target, str(tmp_path), 5)
+    assert res.ok is True and res.image_path == target and res.image_format == "PNG"
+
+
+def test_image_worker_exit_3_without_the_mark_is_still_a_missing_image(monkeypatch, tmp_path):
+    target = str(tmp_path / "out.png")
+    run = _ImgRun(3, 'AGY_ERROR: {"status":"INTERNAL"}')
+    monkeypatch.setattr(swarm.proc_tree, "run_captured", lambda *a, **k: run)
+    res = swarm._run_image_worker(0, "draw", target, str(tmp_path), 5)
+    assert res.ok is False
+    assert "hit its" not in res.error
+
+
+def _watched_popen(returncode, stderr):
+    class _Popen:
+        def __init__(self, *a, **k):
+            self.returncode = returncode
+            self.stdout = io.StringIO("")
+            self.stderr = io.StringIO(stderr)
+
+        def poll(self):
+            return self.returncode
+
+    return _Popen
+
+
+@pytest.fixture
+def quiet_swarm_watch(monkeypatch):
+    finished = []
+    monkeypatch.setattr(swarm_watch, "worker_update", lambda i, **kw: None)
+    monkeypatch.setattr(swarm_watch, "worker_append", lambda i, lines: None)
+    monkeypatch.setattr(
+        swarm_watch, "worker_finish", lambda i, s, a, e, **kw: finished.append((s, a))
+    )
+    return finished
+
+
+@pytest.mark.parametrize("returncode", [3, 0])
+def test_watched_image_worker_no_image_after_a_print_timeout_says_timeout(
+    monkeypatch, tmp_path, quiet_swarm_watch, returncode
+):
+    target = str(tmp_path / "out.png")
+    monkeypatch.setattr(
+        swarm.proc_tree, "popen", lambda *a, **k: _watched_popen(returncode, _IMG_TIMEOUT_STDERR)()
+    )
+    res = swarm._run_image_worker_watched(0, "draw", target, str(tmp_path), 5)
+    assert res.ok is False
+    assert "agy hit its 5s timeout" in res.error
+    assert quiet_swarm_watch == [("error", res.error)]
+    assert swarm._ISOLATION_OK is True
+
+
+def test_watched_image_worker_keeps_an_image_written_before_the_cut(
+    monkeypatch, tmp_path, quiet_swarm_watch
+):
+    target = _png_at(tmp_path / "out.png")
+    monkeypatch.setattr(
+        swarm.proc_tree, "popen", lambda *a, **k: _watched_popen(3, _IMG_TIMEOUT_STDERR)()
+    )
+    res = swarm._run_image_worker_watched(0, "draw", target, str(tmp_path), 5)
+    assert res.ok is True and res.image_path == target
+    assert quiet_swarm_watch[0][0] == "done"
+
+
+def test_serialized_image_worker_keeps_the_agy_error_next_to_the_finalize_error(
+    monkeypatch, tmp_path
+):
+    target = str(tmp_path / "out.png")
+
+    def agy_fails(*a, **k):
+        raise RuntimeError("agy hit its 5s timeout before finishing")
+
+    def no_image(t, txt, start):
+        raise RuntimeError("no image file produced")
+
+    monkeypatch.setattr(server, "_run_agy", agy_fails)
+    monkeypatch.setattr(server, "_finalize_image", no_image)
+    res = swarm._run_image_worker_serialized(0, "draw", target, str(tmp_path), 5, 0.0)
+    assert res.ok is False
+    assert res.error == (
+        "no image file produced (agy also failed: agy hit its 5s timeout before finishing)"
+    )
+
+
+def test_serialized_image_worker_without_an_agy_error_reports_only_the_finalize_error(
+    monkeypatch, tmp_path
+):
+    target = str(tmp_path / "out.png")
+
+    def no_image(t, txt, start):
+        raise RuntimeError("no image file produced")
+
+    monkeypatch.setattr(server, "_run_agy", lambda *a, **k: "")
+    monkeypatch.setattr(server, "_finalize_image", no_image)
+    res = swarm._run_image_worker_serialized(0, "draw", target, str(tmp_path), 5, 0.0)
+    assert res.error == "no image file produced"
+
+
+def test_serialized_image_worker_still_returns_an_image_when_agy_failed(monkeypatch, tmp_path):
+    target = str(tmp_path / "out.png")
+
+    def agy_fails(*a, **k):
+        raise RuntimeError("agy hit its 5s timeout")
+
+    monkeypatch.setattr(server, "_run_agy", agy_fails)
+    monkeypatch.setattr(server, "_finalize_image", lambda t, txt, start: (target, "png", 9))
+    res = swarm._run_image_worker_serialized(0, "draw", target, str(tmp_path), 5, 0.0)
+    assert res.ok is True and res.image_path == target

@@ -5,9 +5,18 @@ Third backend alongside the agy bridge (server.py) and the Codex bridge
 `copilot -p "<prompt>" -s` runs a prompt non-interactively and writes the clean
 final answer straight to STDOUT (the `-s/--silent` flag drops the usage stats),
 then exits. No transcript-scraping — we read the answer from stdout. Verified
-against copilot 1.0.69 on Windows (bumped from 1.0.68: 1.0.69 adds a `--resume`
-convenience flag the bridge doesn't use, and `--session-id` still both sets a
-fresh id and resumes it — re-verified live via a set-then-resume round-trip).
+against copilot 1.0.80 on Windows (bumped from 1.0.69, eleven releases in one
+step, with nothing to change), and re-verified on 1.0.97 and 1.0.105 (ask,
+continue, a read-only run refusing a write) with nothing to change either:
+1.0.85 moved argument parsing to a Rust grammar, and every flag below still
+parses, the `=` form of --deny-tool included. The one entry in 1.0.70-1.0.80
+that could have reached this bridge was 1.0.71's "reject malformed --allow-tool and --deny-tool
+patterns with an error message", since read-only mode IS a pair of --deny-tool
+patterns — re-verified live on 1.0.80 that they still parse, that a workspace file
+read answers, and that a write is still refused ("Blocked: I can't write files in
+this environment", no file created). 1.0.79's BREAKING rename of the sandbox
+setting allowDevToolCaches -> allowDevToolAccess is a config key this bridge never
+reads. `--session-id` still both sets a fresh id and resumes it.
 
 MODELS. copilot offers NO non-interactive way to list them — there is no `models`
 subcommand and an invalid `--model` error names no alternatives — so unlike the agy
@@ -59,11 +68,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 import uuid
 from pathlib import Path
 from typing import Optional
+
+import proc_tree
 
 # The copilot executable. Defaults to "copilot" (resolved via PATH); set
 # COPILOT_BIN to an explicit path when copilot isn't reliably on PATH — e.g. on
@@ -71,7 +83,53 @@ from typing import Optional
 #   %LOCALAPPDATA%\Microsoft\WinGet\Packages\GitHub.Copilot_*\copilot.exe
 # and a terminal opened before install won't have it on PATH. Mirrors AGY_BIN /
 # CODEX_BIN. Read once at import; the launching process's env wins.
-COPILOT_BIN = os.environ.get("COPILOT_BIN", "copilot")
+COPILOT_BIN_ENV = os.environ.get("COPILOT_BIN", "copilot")
+
+
+def _npm_native(script: str) -> Optional[str]:
+    """The copilot.exe that npm's `npm-loader.js` would start, or None.
+
+    The loader resolves `@github/copilot-<platform>-<arch>` from its own package
+    and spawns the binary that package exports, with the same arguments, stdio
+    and environment; nothing else. So starting that binary directly is the same
+    program, minus node and minus cmd.exe. Looked up the way node would find it:
+    nested under the copilot package first, then hoisted beside it.
+    """
+    if os.path.basename(script).lower() != "npm-loader.js":
+        return None
+    package = os.path.dirname(script)
+    for arch in proc_tree.npm_archs():
+        for scope in (os.path.join(package, "node_modules", "@github"), os.path.dirname(package)):
+            exe = os.path.join(scope, f"copilot-win32-{arch}", "copilot.exe")
+            if os.path.isfile(exe):
+                return exe
+    return None
+
+
+def _resolve_bin() -> str:
+    """The copilot executable to launch: COPILOT_BIN_ENV, unless that is an npm shim.
+
+    npm installs copilot on Windows as a `copilot.cmd` that runs a node script, and
+    that leaves two problems. Launched by bare name, the shim isn't found at all,
+    because Windows looks only for a .exe. Launched by path, it runs through
+    cmd.exe, so proc_tree.check_args refuses every prompt with `"`, `&` or `%`,
+    which is nearly every diff. So a shim, found on PATH or named in COPILOT_BIN,
+    is traded for the native copilot.exe its script would start (see _npm_native).
+    Anything else, a winget copilot.exe included, launches as given, as before.
+    If the native binary can't be found, the shim's full path is used: it starts,
+    and check_args still refuses a dangerous prompt.
+    """
+    if os.path.sep in COPILOT_BIN_ENV or os.path.isfile(COPILOT_BIN_ENV):
+        found = COPILOT_BIN_ENV
+    else:
+        found = shutil.which(COPILOT_BIN_ENV)
+        if not found or not proc_tree.is_batch_file(found):
+            return COPILOT_BIN_ENV
+    script = proc_tree.npm_shim_script(found)
+    return (_npm_native(script) if script else None) or found
+
+
+COPILOT_BIN = _resolve_bin()
 
 # copilot's state home. It stores per-session state under
 # ~/.copilot/session-state/<id>/ (each dir has workspace.yaml + events.jsonl).
@@ -358,11 +416,10 @@ def run_copilot(
     session_id = _resolve_session(workspace, continue_conv)
     args = build_args(prompt, workspace, sandbox, model, session_id)
 
-    proc = subprocess.run(
+    proc = proc_tree.run_captured(
         args,
         cwd=workspace,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
         **_TEXT,
         timeout=timeout_s + 30,
         **_spawn_kwargs(),
@@ -430,7 +487,7 @@ def run_copilot_streaming(
     args = build_args(prompt, workspace, sandbox, model, session_id, json_stream=True)
 
     state: dict = {"answer": "", "delta": ""}
-    proc = subprocess.Popen(
+    proc = proc_tree.popen(
         args,
         cwd=workspace,
         stdin=subprocess.DEVNULL,
@@ -480,8 +537,11 @@ def run_copilot_streaming(
         proc.wait(timeout=timeout_s + 30)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
-        proc.wait()
+        proc_tree.kill_tree(proc)  # the grandchild must die too — see proc_tree
+        try:
+            proc.wait(timeout=proc_tree.REAP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass  # reaped or not, the caller's deadline stays real
     # Short grace to flush buffered lines; don't block on a lingering child (the
     # answer was reconstructed from the stream's assistant message during the run).
     ot.join(timeout=1)
@@ -509,10 +569,10 @@ def run_copilot_streaming(
 def copilot_version() -> Optional[str]:
     """`copilot --version` first line, or None if copilot can't be run."""
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [COPILOT_BIN, "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=15,
             **_spawn_kwargs(),

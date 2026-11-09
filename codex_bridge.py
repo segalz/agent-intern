@@ -17,9 +17,15 @@ rollout file that appeared during the run) and pin it to the workspace; a later
 `codex_continue` resumes the exact session with `codex exec resume <id>`. If the
 in-memory pin is gone (server restarted) we fall back to the newest rollout whose
 recorded cwd matches the workspace — the codex analogue of agy's
-last_conversations.json lookup. This is verified against codex-cli 0.144.1
-(flags, the rollout-*.jsonl session layout, and a live round-trip all unchanged
-from the 0.141.0 baseline).
+last_conversations.json lookup. This is verified against codex-cli 0.149.1, and
+re-verified on 0.162.1 (ask, resume, and the Windows read-only refusal below)
+(flags and the rollout-*.jsonl session layout unchanged from the 0.141.0 baseline;
+ask and resume both round-tripped live). 0.147.0 removed `codex exec --full-auto`,
+which this bridge never passed. One thing DID break on the way to 0.149.1 and is
+fixed here: `codex exec resume` enforces the trusted-directory check, so a resume
+in a non-git workspace died with "Not inside a trusted directory and
+--skip-git-repo-check was not specified" while the fresh ask that created the very
+same session succeeded. build_args now passes that flag on both paths.
 
 SECURITY. `codex exec` runs the model as an autonomous agent with no interactive
 approval gate. Unlike agy's no-op `--sandbox`, codex's `-s/--sandbox` is a REAL
@@ -27,6 +33,23 @@ boundary: the default `read-only` lets the agent read and answer but change
 nothing on disk; callers must opt into `workspace-write` (edit files under the
 workspace) or `danger-full-access` (no sandbox — avoid). Even so, only run it
 with trusted prompts on trusted content.
+
+WINDOWS, as of 0.149.1: that boundary is currently TOO tight to be useful, and
+fails in the worst possible way — silently. Every command is refused under BOTH
+`read-only` and `workspace-write`, down to `pwd`, with "rejected: blocked by
+policy" on stderr; the policy engine cannot classify the `pwsh -Command <...>`
+wrapper codex itself builds. Since shell commands are how codex reads files, a
+sandboxed run on Windows sees NOTHING of your workspace — and codex does not say
+so. Asked for the version in a local pyproject.toml declaring 0.27.0, it fell back
+to a WEB SEARCH and answered "1.2.0" from an unrelated GitHub repository (another
+run said "0.1.0"); with the sandbox off, the same prompt answered 0.27.0. Exit code
+0 and a full -o file both times. Known upstream (openai/codex #40060, #38886).
+
+Because codex reports success, the bridge cannot fix this — but it refuses to
+launder it: _policy_note appends a visible warning to any answer whose run had
+commands refused. It APPENDS rather than raises, because under `read-only` a model
+that tries to write is SUPPOSED to be blocked and that answer is fine; what is not
+fine is silence.
 """
 
 from __future__ import annotations
@@ -34,6 +57,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -41,13 +65,76 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import proc_tree
+
 # The codex executable. Defaults to "codex" (resolved via PATH); set CODEX_BIN to
 # an explicit path when codex isn't reliably on PATH — e.g. on Windows, where the
 # native installer drops it at
 #   %LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe
 # and a fresh terminal/reboot can leave it off a non-login shell's PATH. Mirrors
 # AGY_BIN in server.py. Read once at import; the launching process's env wins.
-CODEX_BIN = os.environ.get("CODEX_BIN", "codex")
+CODEX_BIN_ENV = os.environ.get("CODEX_BIN", "codex")
+
+# codex's Rust target triple for each npm arch name.
+_NPM_TRIPLES = {"x64": "x86_64-pc-windows-msvc", "arm64": "aarch64-pc-windows-msvc"}
+
+
+def _npm_native(script: str) -> tuple[Optional[str], dict]:
+    """The codex.exe npm's `bin/codex.js` would start, and the env it would add.
+
+    codex.js finds `@openai/codex-<platform>-<arch>`, falling back to the codex
+    package's own vendor/ dir, and spawns `vendor/<triple>/bin/codex.exe` with the
+    same arguments and stdio. Its env adds CODEX_MANAGED_PACKAGE_ROOT and a
+    CODEX_MANAGED_BY_* flag, which only shape codex's update hints; the bridge
+    sets them the same way (npm, codex.js's own default), so the binary sees what
+    it would under the shim. (None, {}) when this isn't codex's script or the
+    binary isn't there.
+    """
+    if os.path.basename(script).lower() != "codex.js":
+        return None, {}
+    package = os.path.dirname(os.path.dirname(script))
+    for arch in proc_tree.npm_archs():
+        vendor_dirs = [
+            os.path.join(package, "node_modules", "@openai", f"codex-win32-{arch}", "vendor"),
+            os.path.join(os.path.dirname(package), f"codex-win32-{arch}", "vendor"),
+            os.path.join(package, "vendor"),
+        ]
+        for vendor in vendor_dirs:
+            exe = os.path.join(vendor, _NPM_TRIPLES[arch], "bin", "codex.exe")
+            if os.path.isfile(exe):
+                env = {"CODEX_MANAGED_PACKAGE_ROOT": os.path.realpath(package)}
+                env["CODEX_MANAGED_BY_NPM"] = "1"
+                return exe, env
+    return None, {}
+
+
+def _resolve_bin() -> tuple[str, dict]:
+    """The codex executable to launch, and any env it needs on top of ours.
+
+    CODEX_BIN_ENV as given, unless that is an npm shim. npm installs codex on
+    Windows as a `codex.cmd` that runs a node script, which Windows won't find by
+    bare name (it looks only for a .exe) and which, launched by path, runs through
+    cmd.exe, so proc_tree.check_args refuses every prompt with `"`, `&` or `%`. A
+    shim, found on PATH or named in CODEX_BIN, is traded for the native codex.exe
+    its script would start (see _npm_native). Anything else, the standalone
+    installer's codex.exe included, launches as given, as before. If the native
+    binary can't be found, the shim's full path is used: it starts, and
+    check_args still refuses a dangerous prompt.
+    """
+    if os.path.sep in CODEX_BIN_ENV or os.path.isfile(CODEX_BIN_ENV):
+        found = CODEX_BIN_ENV
+    else:
+        found = shutil.which(CODEX_BIN_ENV)
+        if not found or not proc_tree.is_batch_file(found):
+            return CODEX_BIN_ENV, {}
+    script = proc_tree.npm_shim_script(found)
+    exe, env = _npm_native(script) if script else (None, {})
+    return (exe, env) if exe else (found, {})
+
+
+# _LAUNCH_ENV is what codex.js would have added when CODEX_BIN is the binary an
+# npm shim stood for; empty otherwise, and then codex inherits our env untouched.
+CODEX_BIN, _LAUNCH_ENV = _resolve_bin()
 
 # codex's state home (config + sessions). codex honors CODEX_HOME; default ~/.codex.
 CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
@@ -68,6 +155,191 @@ _UUID_RE = re.compile(
 # Strips the ANSI color codes codex wraps some output in (e.g. `login status`
 # prints "\x1b[31;1mLogged in using ChatGPT\x1b[0m").
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# codex logs a command its sandbox policy refused as, on one stderr line:
+#   ERROR codex_core::tools::router: error=exec_command failed for `"...pwsh.exe"
+#   -Command 'rg -n version pyproject.toml'`: CreateProcess { message:
+#   "Rejected(\"... rejected: blocked by policy\")" }
+# The run still EXITS 0 with a confident final message, which is the whole problem.
+_POLICY_BLOCK_RE = re.compile(r"rejected:\s*blocked by policy", re.I)
+
+
+def _policy_block_count(stderr: str) -> int:
+    """How many commands codex's sandbox policy refused to run."""
+    return len(_POLICY_BLOCK_RE.findall(stderr or ""))
+
+
+def _policy_note(blocked: int, sandbox: str) -> str:
+    """A visible warning to append when codex answered despite refused commands.
+
+    Appended rather than raised, deliberately. A refusal is not automatically a
+    failure: under `read-only` a model that TRIES to write is supposed to be
+    blocked, and that run's answer is perfectly good. What is not acceptable is
+    silence -- codex exits 0 and its final message never mentions that it could not
+    look at anything, so the bridge has to say it.
+
+    The failure this exists for, verified on codex 0.149.1 / Windows: EVERY command
+    was refused under both `read-only` and `workspace-write` (down to `pwd`),
+    because the policy engine cannot classify the `pwsh -Command <...>` wrapper
+    codex itself builds. Asked for the version in a local pyproject.toml declaring
+    0.27.0, codex could not read it, fell back to a WEB SEARCH, and answered "1.2.0"
+    from an unrelated GitHub repository -- with no hint that anything had gone
+    wrong. With the sandbox off the same prompt answered 0.27.0. Known upstream on
+    Windows (openai/codex #40060, #38886).
+    """
+    return (
+        f"\n\n---\n[agent-intern] WARNING: codex's sandbox refused to run {blocked} "
+        f'command(s) under sandbox={sandbox!r} ("blocked by policy"), and codex does '
+        "not mention this in its answer. If those were the commands it needed to read "
+        "your files, the answer above is not based on them -- codex falls back to its "
+        "own knowledge or a web search instead. On Windows this currently affects every "
+        "sandboxed run (see docs/security.md in the agent-intern repo); a single refusal under "
+        "'read-only' may just be a blocked write, which is the sandbox working."
+    )
+
+
+# --- the sandbox codex actually ran under --------------------------------------
+# On Windows codex DOWNGRADES a writable sandbox to read-only unless a Windows
+# sandbox backend is configured (`windows.sandbox` = mxc | unelevated | elevated,
+# in ~/.codex/config.toml or as `-c windows.sandbox=...`). `-s workspace-write`
+# is accepted without complaint, and only the run's header says otherwise.
+# Verified on codex-cli 0.166.0 / Windows, header-only (no model turn): `codex exec
+# -s workspace-write` printed "sandbox: read-only", and adding
+# `-c windows.sandbox=unelevated` printed "sandbox: workspace-write [workdir, /tmp,
+# $TMPDIR]". Under --json the header is not printed at all (stderr empty), but the
+# session's rollout records the same thing as turn_context.sandbox_policy.type.
+# The bridge reports the downgrade; it does not pass -c windows.sandbox itself, since
+# no real model run has verified that backend, and the config key is the user's
+# switch.
+CODEX_CONFIG = CODEX_HOME / "config.toml"
+_SANDBOX_HEADER_RE = re.compile(r"^sandbox:\s*([a-z][a-z-]*)")
+_SESSION_HEADER_RE = re.compile(r"^session id:\s*(\S+)")
+_HEADER_RULE_RE = re.compile(r"^-{4,}\s*$")
+_WINDOWS_SANDBOX_VALUES = ("mxc", "unelevated", "elevated")
+
+
+def _header_block(stderr: Optional[str]) -> list[str]:
+    """The lines of `codex exec`'s plain-text header: between the first two
+    "--------" rules at the top of stderr ("OpenAI Codex vX", rule, workdir/model/
+    sandbox/session id..., rule, then the transcript). [] when there is no such
+    block, so a "sandbox:" line in the transcript (a prompt, a command's output)
+    is never mistaken for codex's own report."""
+    lines = (stderr or "").splitlines()
+    rules = [i for i, ln in enumerate(lines[:40]) if _HEADER_RULE_RE.match(ln)]
+    if len(rules) < 2:
+        return []
+    return lines[rules[0] + 1 : rules[1]]
+
+
+def _header_field(stderr: Optional[str], pattern: re.Pattern) -> Optional[str]:
+    for line in _header_block(stderr):
+        m = pattern.match(line.strip())
+        if m:
+            return m.group(1)
+    return None
+
+
+def _header_sandbox(stderr: Optional[str]) -> Optional[str]:
+    """The sandbox mode named in `codex exec`'s plain-text header, or None."""
+    return _header_field(stderr, _SANDBOX_HEADER_RE)
+
+
+def _header_session_id(stderr: Optional[str]) -> Optional[str]:
+    """The `session id:` named in `codex exec`'s plain-text header, or None."""
+    return _header_field(stderr, _SESSION_HEADER_RE)
+
+
+def _rollout_sandbox(path: Optional[Path]) -> Optional[str]:
+    """turn_context.sandbox_policy.type from a rollout file, or None."""
+    if path is None:
+        return None
+    try:
+        with path.open(encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"turn_context"' not in line:
+                    continue
+                try:
+                    payload = json.loads(line).get("payload") or {}
+                except ValueError:
+                    continue
+                policy = payload.get("sandbox_policy")
+                if isinstance(policy, dict) and isinstance(policy.get("type"), str):
+                    return policy["type"]
+    except OSError:
+        return None
+    return None
+
+
+def _sandbox_downgrade_note(requested: str, effective: Optional[str]) -> str:
+    """A visible warning when codex ran under a different sandbox than requested.
+
+    Empty when they match or the effective mode is unknown (no header, no rollout):
+    silence is better than a guess."""
+    if not effective or effective == requested:
+        return ""
+    note = (
+        f"\n\n---\n[agent-intern] WARNING: you asked for sandbox={requested!r}, but codex "
+        f"ran this under sandbox={effective!r}"
+    )
+    if os.name == "nt" and requested != "read-only" and effective == "read-only":
+        note += (
+            ", so it could not write anything. On Windows codex drops to read-only "
+            'unless a Windows sandbox is configured: set `sandbox = "unelevated"` (or '
+            '"elevated" / "mxc") under `[windows]` in ~/.codex/config.toml '
+            "(codex's `windows.sandbox` key). codex_status shows whether it is set."
+        )
+    else:
+        note += "."
+    return note
+
+
+def windows_sandbox_setting() -> Optional[str]:
+    """The `windows.sandbox` value in codex's config.toml, or None if unset/unreadable.
+
+    Reads `[windows] sandbox = "..."` and the dotted `windows.sandbox = "..."` form.
+    tomllib where it exists (3.11+); a line scan on 3.10, enough for those two forms.
+    """
+    try:
+        text = CODEX_CONFIG.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        import tomllib
+    except ImportError:  # Python 3.10
+        tomllib = None
+    if tomllib is not None:
+        try:
+            value = (tomllib.loads(text).get("windows") or {}).get("sandbox")
+        except (tomllib.TOMLDecodeError, AttributeError):
+            return None
+        return value if isinstance(value, str) else None
+    section = ""
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line.strip("[] ")
+            continue
+        m = re.match(r"""^(windows\.)?sandbox\s*=\s*["']([^"']*)["']$""", line)
+        # `windows.sandbox` belongs at the top level, a bare `sandbox` under [windows].
+        if m and (section == "" if m.group(1) else section == "windows"):
+            return m.group(2)
+    return None
+
+
+def windows_sandbox_status() -> tuple[bool, str]:
+    """(ok, detail) for the `windows sandbox` row. Never a failure: read-only (the
+    default) works without it; it only decides whether workspace-write can write."""
+    value = windows_sandbox_setting()
+    if value:
+        known = "" if value in _WINDOWS_SANDBOX_VALUES else " (not a value this bridge knows)"
+        return (True, f"configured: {value}{known}")
+    return (
+        True,
+        "not configured — sandbox='workspace-write' runs READ-ONLY on Windows (codex "
+        'downgrades it); set sandbox = "unelevated" under [windows] in '
+        f"{CODEX_CONFIG} to allow writes",
+    )
+
 
 # Text decoding for codex's subprocesses: it emits UTF-8, which bare text=True
 # would decode with the Windows locale codepage (cp1254/cp1252) and mangle on any
@@ -94,10 +366,17 @@ def _spawn_kwargs() -> dict:
     Cosmetic only: codex writes its answer to the -o file regardless of the
     controlling terminal (it has no agy-style stdout bug). Windows uses
     CREATE_NO_WINDOW so a child console doesn't flash; POSIX starts a new session.
+    Plus `env`, only when codex was resolved from an npm shim (_LAUNCH_ENV).
     """
     if os.name == "nt":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
-    return {"start_new_session": True}
+        kwargs = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+    else:
+        kwargs = {"start_new_session": True}
+    if _LAUNCH_ENV:
+        # codex.js drops every CODEX_MANAGED_BY_* before setting its own.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CODEX_MANAGED_BY_")}
+        kwargs["env"] = {**env, **_LAUNCH_ENV}
+    return kwargs
 
 
 def normalize_workspace(ws: Optional[str]) -> str:
@@ -209,8 +488,16 @@ def _resume_target_for(workspace: str) -> Optional[str]:
 
 # ----------------------------------------------------------------- conversation history
 def _rollout_for_session(sid: str) -> Optional[Path]:
-    """The rollout file whose session id equals `sid` (newest wins), or None."""
-    matches = [p for p in _iter_rollouts() if _session_id_of(p) == sid]
+    """The rollout file whose session id equals `sid` (newest wins), or None.
+
+    By FILENAME first (rollout-<ts>-<uuid>.jsonl carries the id): a glob instead of
+    opening every rollout under the sessions dir. Only when no name matches does it
+    fall back to reading each file's session_meta, the old full scan."""
+    matches: list[Path] = []
+    if SESSIONS_DIR.exists() and _UUID_RE.fullmatch(sid or ""):
+        matches = list(SESSIONS_DIR.glob(f"**/rollout-*{sid}.jsonl"))
+    if not matches:
+        matches = [p for p in _iter_rollouts() if _session_id_of(p) == sid]
     if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime if p.exists() else 0.0)
@@ -221,8 +508,11 @@ def read_history(workspace: str, continue_conv: bool) -> list[dict]:
 
     Oldest first, for the watch view's conversation history. Resolves the session
     the same way a resume would (in-memory pin, then newest matching on-disk
-    rollout), then walks its rollout JSONL pulling the clean user prompts
-    (event_msg/user_message) and final agent answers (event_msg/agent_message).
+    rollout), then walks its rollout JSONL pulling the clean user prompts and
+    final agent answers. Through 0.144.1 those are event_msg/user_message and
+    event_msg/agent_message; from 0.149.1 on they are event_msg/item_completed
+    with a UserMessage or AgentMessage item, whose text is in item.content[] and
+    whose agent messages also carry a phase ("commentary" or "final_answer").
     Returns [] for a fresh ask, an unresolved/absent session, or any read error.
     """
     if not continue_conv:
@@ -249,13 +539,24 @@ def read_history(workspace: str, continue_conv: bool) -> list[dict]:
         if e.get("type") != "event_msg":
             continue
         p = e.get("payload") or {}
-        ptype, msg = p.get("type"), (p.get("message") or "").strip()
-        if not msg:
+        ptype = p.get("type")
+        if ptype == "item_completed":
+            item = p.get("item") or {}
+            if item.get("type") == "UserMessage":
+                role = "user"
+            elif item.get("type") == "AgentMessage" and item.get("phase") != "commentary":
+                role = "assistant"
+            else:
+                continue
+            parts = item.get("content") or []
+            msg = "".join(c.get("text") or "" for c in parts if isinstance(c, dict)).strip()
+        elif ptype in ("user_message", "agent_message"):
+            role = "user" if ptype == "user_message" else "assistant"
+            msg = (p.get("message") or "").strip()
+        else:
             continue
-        if ptype == "user_message":
-            turns.append({"role": "user", "content": msg})
-        elif ptype == "agent_message":
-            turns.append({"role": "assistant", "content": msg})
+        if msg:
+            turns.append({"role": role, "content": msg})
     return turns
 
 
@@ -293,6 +594,15 @@ def build_args(
     session's recorded cwd/sandbox (codex's `resume` subcommand has no `-s`/`-C`),
     so it passes only the id, optional model override, the output file, and the
     prompt — the subprocess cwd is still set to the workspace by the caller.
+
+    `--skip-git-repo-check` goes on BOTH paths, though, because `codex exec resume`
+    enforces the trusted-directory check just like a fresh run does: verified on
+    0.149.1 that a resume in a plain (non-git, untrusted) workspace dies with
+    "Not inside a trusted directory and --skip-git-repo-check was not specified"
+    while the fresh ask that created the session succeeded. It only bit outside a
+    git repo, which is why a suite of hermetic tests and everyday use inside a
+    project never saw it. `codex exec resume --help` lists the flag, so this is the
+    supported fix rather than a workaround.
     `json_stream` adds `--json` so codex emits its events as JSONL on stdout (for
     watch mode); the final answer is still read from `output_file` either way.
     """
@@ -302,7 +612,8 @@ def build_args(
     if model:
         args += ["-m", model]
     if not resume_session:
-        args += ["-s", sandbox, "-C", workspace, "--skip-git-repo-check"]
+        args += ["-s", sandbox, "-C", workspace]
+    args += ["--skip-git-repo-check"]
     if json_stream:
         args += ["--json"]
     args += ["-o", output_file, prompt]
@@ -350,11 +661,10 @@ def run_codex(
     before = _rollout_names() if (not continue_conv and pin) else set()
     try:
         args = build_args(prompt, workspace, sandbox, model, resume_session, out_path)
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             args,
             cwd=workspace,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=timeout_s + 30,
             **_spawn_kwargs(),
@@ -376,10 +686,22 @@ def run_codex(
                 f"stderr: {(proc.stderr or '')[-300:]}"
             )
 
-        if not continue_conv and pin:
-            sid = _capture_new_session(before)
-            if sid:
-                _pin(workspace, sid)
+        blocked = _policy_block_count(proc.stderr or "")
+        if blocked:
+            answer += _policy_note(blocked, sandbox)
+        captured = _capture_new_session(before) if (not continue_conv and pin) else None
+        if resume_session is None:  # resume inherits the session's sandbox: no -s sent
+            effective = _header_sandbox(proc.stderr)
+            if effective is None:
+                # No header to read: ask the run's rollout, found by the header's
+                # session id or the one _capture_new_session saw appear.
+                sid = _header_session_id(proc.stderr) or captured
+                if sid:
+                    effective = _rollout_sandbox(_rollout_for_session(sid))
+            answer += _sandbox_downgrade_note(sandbox, effective)
+
+        if captured:
+            _pin(workspace, captured)
         return answer
     finally:
         try:
@@ -418,7 +740,7 @@ def run_codex_streaming(
     before = set() if continue_conv else _rollout_names()
     args = build_args(prompt, workspace, sandbox, model, resume_session, out_path, json_stream=True)
     try:
-        proc = subprocess.Popen(
+        proc = proc_tree.popen(
             args,
             cwd=workspace,
             stdin=subprocess.DEVNULL,
@@ -433,16 +755,23 @@ def run_codex_streaming(
         # and the answer is already in the -o file. So read stdout + stderr on daemon
         # threads (a lingering pipe can't stall us) and wait on the process itself.
         err_chunks: list[str] = []
+        thread_ids: list[str] = []  # from `thread.started`: names this run's rollout
 
         def _pump_stdout() -> None:
             try:
                 for line in proc.stdout:
                     line = line.strip()
-                    if not line or on_event is None:
+                    if not line:
                         continue
                     try:
                         ev = json.loads(line)
                     except ValueError:
+                        continue
+                    if isinstance(ev, dict) and ev.get("type") == "thread.started":
+                        tid = ev.get("thread_id")
+                        if isinstance(tid, str) and tid:
+                            thread_ids.append(tid)
+                    if on_event is None:
                         continue
                     try:
                         on_event(ev)
@@ -467,8 +796,11 @@ def run_codex_streaming(
             proc.wait(timeout=timeout_s + 30)
         except subprocess.TimeoutExpired:
             timed_out = True
-            proc.kill()
-            proc.wait()
+            proc_tree.kill_tree(proc)  # the grandchild must die too — see proc_tree
+            try:
+                proc.wait(timeout=proc_tree.REAP_GRACE_S)
+            except subprocess.TimeoutExpired:
+                pass  # reaped or not, the caller's deadline stays real
         # Let the readers flush buffered lines, but don't block on a child still
         # holding the pipe open — the answer comes from the -o file regardless. A short
         # grace keeps the "done" transition snappy once codex has exited.
@@ -487,6 +819,16 @@ def run_codex_streaming(
                 f"codex produced no final message (empty -o file). stderr: {(stderr or '')[-300:]}"
             )
 
+        blocked = _policy_block_count(stderr)
+        if blocked:
+            answer += _policy_note(blocked, sandbox)
+        if resume_session is None:
+            # --json prints no header; the rollout records the effective policy.
+            effective = _header_sandbox(stderr)
+            if effective is None and thread_ids:
+                effective = _rollout_sandbox(_rollout_for_session(thread_ids[0]))
+            answer += _sandbox_downgrade_note(sandbox, effective)
+
         if not continue_conv and pin:
             sid = _capture_new_session(before)
             if sid:
@@ -503,10 +845,10 @@ def run_codex_streaming(
 def codex_version() -> Optional[str]:
     """`codex --version` text (single line), or None if codex can't be run."""
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [CODEX_BIN, "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
@@ -524,10 +866,10 @@ def codex_login_status() -> tuple[bool, str]:
     codex's own first line (e.g. "Logged in using ChatGPT"), ANSI-stripped.
     """
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [CODEX_BIN, "login", "status"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
@@ -556,6 +898,10 @@ def status_rows() -> list[tuple[str, bool, str]]:
 
     logged_in, detail = codex_login_status()
     rows.append(("codex auth", logged_in, detail))
+
+    if os.name == "nt":
+        ok, detail = windows_sandbox_status()
+        rows.append(("windows sandbox", ok, detail))
 
     rows.append(("sessions dir", SESSIONS_DIR.exists(), str(SESSIONS_DIR)))
 

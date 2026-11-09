@@ -1,12 +1,12 @@
 [project]
 name = "agent-intern"
-version = "0.26.0"
-description = "MCP server bridging the Antigravity (agy), OpenAI Codex, GitHub Copilot, Cursor, Grok Build, and Kimi Code CLIs so Claude Code can drive them as sub-agents"
+version = "0.36.0"
+description = "MCP server bridging the Antigravity (agy), OpenAI Codex, GitHub Copilot, Cursor, opencode, Grok Build, Kimi Code, and Muse Code CLIs so Claude Code can drive them as sub-agents"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Sinan Tüfekçi" }]
-keywords = ["mcp", "claude", "claude-code", "antigravity", "gemini", "agy", "codex", "copilot", "github-copilot", "cursor", "cursor-agent", "grok", "grok-build", "xai", "kimi", "kimi-code", "moonshot", "llm", "ai"]
+keywords = ["mcp", "claude", "claude-code", "antigravity", "gemini", "agy", "codex", "copilot", "github-copilot", "cursor", "cursor-agent", "grok", "grok-build", "xai", "kimi", "kimi-code", "moonshot", "opencode", "sst", "muse", "muse-code", "meta", "llm", "ai"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -16,15 +16,17 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
     "Topic :: Software Development :: Code Generators",
     "Topic :: Utilities",
 ]
 dependencies = [
-    # Upper bound is deliberate: fastmcp 4 targets the 2026-07-28 MCP spec and drops
-    # the 3.x compatibility shims. CI installs unpinned (`pip install -e .[dev]`), so
-    # without a cap the first stable 4.0 silently becomes what every fresh install
-    # gets. Lift to <5 once the server is verified against 4.0 stable.
-    "fastmcp>=2.0.0,<4",
+    # Upper bound is deliberate: CI installs unpinned (`pip install -e .[dev]`), so
+    # without a cap the next major silently becomes what every fresh install gets.
+    # 4.x is verified (4.1.0: the suite, stdio, a live call with progress
+    # notifications, and Claude Code's own handshake). Lift to <6 the same way.
+    "fastmcp>=2.0.0,<5",
 ]
 
 [project.optional-dependencies]
@@ -55,19 +57,39 @@ Sponsor = "https://github.com/sponsors/SinanTufekci"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
-# Flat layout: the distributable is the server module plus its swarm + codex +
-# copilot helpers. Without this, setuptools auto-discovery aborts because the repo
-# root also holds test_*.py.
+# Flat layout: the distributable is the server module plus every helper module
+# at the repo root. Without this, setuptools auto-discovery aborts because the
+# root also holds test_*.py. Nothing adds a new root module here for you — 0.30.1
+# shipped without proc_tree and could not start — so
+# test_every_runtime_module_is_listed_in_py_modules compares this list to disk.
 [tool.setuptools]
 py-modules = [
     "server",
+    "doctor",
+    "antigravity_tools",
     "swarm",
     "swarm_watch",
+    "swarm_presets",
+    "swarm_tools",
+    "watch_ui",
+    "watch_server",
+    "proc_tree",
     "codex_bridge",
+    "codex_tools",
     "copilot_bridge",
+    "copilot_tools",
     "cursor_bridge",
+    "cursor_tools",
+    "claude_bridge",
+    "claude_tools",
     "grok_bridge",
+    "grok_tools",
     "kimi_bridge",
+    "kimi_tools",
+    "muse_bridge",
+    "muse_tools",
+    "opencode_bridge",
+    "opencode_tools",
 ]
 
 [tool.ruff]
@@ -78,6 +100,7 @@ target-version = "py310"
 select = ["E", "F", "W", "I", "B"]
 
 [tool.ruff.lint.per-file-ignores]
-# swarm_watch.py is mostly one embedded HTML/CSS/JS page; its long style/script
-# lines are an asset, not code to hard-wrap.
+# swarm_watch.py and watch_ui.py are mostly embedded HTML/CSS/JS; their long
+# style/script lines are an asset, not code to hard-wrap.
 "swarm_watch.py" = ["E501"]
+"watch_ui.py" = ["E501"]

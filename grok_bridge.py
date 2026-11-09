@@ -91,6 +91,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+import proc_tree
+
 # The grok executable. Set GROK_BIN to an explicit path to override. Mirrors
 # AGY_BIN / CODEX_BIN / COPILOT_BIN / CURSOR_BIN. Read once at import; the
 # launching process's env wins.
@@ -275,10 +277,10 @@ def list_models() -> list[str]:
     if _MODELS_CACHE is not None:
         return _MODELS_CACHE
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [GROK_BIN, "models"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=20,
             env=_env(),
             **_TEXT,
@@ -444,11 +446,10 @@ def run_grok(
     resume_id, use_continue = _resume_flags(workspace, continue_conv)
     args = build_args(prompt, workspace, sandbox, model, resume_id, use_continue)
 
-    proc = subprocess.run(
+    proc = proc_tree.run_captured(
         args,
         cwd=workspace,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
         timeout=timeout_s + 30,
         env=_env(),
         **_TEXT,
@@ -520,7 +521,7 @@ def run_grok_streaming(
     args = build_args(prompt, workspace, sandbox, model, resume_id, use_continue, json_stream=True)
 
     state: dict = {}
-    proc = subprocess.Popen(
+    proc = proc_tree.popen(
         args,
         cwd=workspace,
         stdin=subprocess.DEVNULL,
@@ -569,8 +570,11 @@ def run_grok_streaming(
         proc.wait(timeout=timeout_s + 30)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
-        proc.wait()
+        proc_tree.kill_tree(proc)  # the grandchild must die too — see proc_tree
+        try:
+            proc.wait(timeout=proc_tree.REAP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass  # reaped or not, the caller's deadline stays real
     ot.join(timeout=1)
     et.join(timeout=1)
 
@@ -597,10 +601,10 @@ def run_grok_streaming(
 def grok_version() -> Optional[str]:
     """`grok --version` first line (e.g. "grok 1.0.3 (1a29d5bc12)"), or None."""
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [GROK_BIN, "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=15,
             env=_env(),
             **_TEXT,
@@ -622,10 +626,10 @@ def auth_status() -> tuple[bool, str]:
     without any local credential file.
     """
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [GROK_BIN, "models"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=20,
             env=_env(),
             **_TEXT,

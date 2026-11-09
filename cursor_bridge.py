@@ -6,17 +6,28 @@ Fourth backend alongside the agy bridge (server.py), the Codex bridge
 kind like codex/copilot: `cursor-agent -p "<prompt>" --output-format text` runs a
 prompt non-interactively and writes the clean final answer to STDOUT, then exits.
 No transcript-scraping — we read the answer from stdout. Verified against
-cursor-agent 2026.07.23 on Windows (bumped from 2026.07.08). Everything the bridge
+cursor-agent 2026.07.23 on Windows (bumped from 2026.07.08), and re-verified on
+2026.08.11, 2026.10.14 and 2026.11.05 (ask, continue, and ask mode refusing a
+write; 2026.10.14 also a shell command). Everything the bridge
 depends on structurally still holds — `create-chat` mints an id, `models` lists,
 `status` reports auth, every flag we pass is still in --help, and the on-disk
 chats/<id>/meta.json cwd layout the continue fallback reads is unchanged. The one
-real change was the MODEL LIST: 2026.07.23 reshuffled it (193 ids), retiring
+real change was the MODEL LIST: 2026.07.23 reshuffled it (193 ids at the time,
+204 when last counted — the catalogue moves without a CLI release), retiring
 `sonnet-4-thinking` and the bare `claude-opus-4-8` that our docs named as examples,
 and it now bakes effort/speed into the id (…-low/-high/-xhigh/-max, each with a
 -fast twin). See validate_model for why that also loosened validation to accept a
-family base. NOTE: a live agent turn could not be re-verified on 2026.07.23 — the
-account was at its Cursor usage limit — so the run path itself is confirmed only by
-structure and by the bridge cleanly surfacing cursor's own limit error.
+family base; every model id the docs still name was re-checked against the live
+list and all of them validate.
+
+The live-turn gap is now CLOSED. That NOTE used to say a real agent turn could not
+be re-verified on 2026.07.23 because the account sat at its Cursor usage limit, so
+the run path was confirmed only structurally. It has since been exercised
+end-to-end through the bridge on that same version: an ask read a workspace file
+and answered from it, a continue resumed the pinned chat and recalled it, and a
+`read-only` run refused to write ("I'm in Ask mode … I can't create or write
+files") with no file created — so cursor's agent-enforced mode holds in practice,
+not just in --help.
 
 CONTINUE / RESUME. cursor-agent has a `create-chat` command that mints a new chat
 and prints its id, plus a `--resume <chatId>` flag that resumes an existing chat.
@@ -70,6 +81,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+import proc_tree
+
 # The cursor-agent executable. On Windows the installer drops a `cursor-agent.CMD`
 # shim (PowerShell -> cursor-agent.ps1); a bare "cursor-agent" name can't be run
 # by CreateProcess, so we resolve it via shutil.which (which honors PATHEXT and
@@ -87,6 +100,55 @@ def _resolve_bin() -> str:
 
 
 CURSOR_BIN = _resolve_bin()
+
+# A cursor-agent release directory under the install's versions/: YYYY.MM.DD, an
+# optional -HH-MM-SS, then -<commit>. Copied from cursor-agent.ps1's own filter.
+_VERSION_DIR_RE = re.compile(r"^(\d{4})\.(\d{1,2})\.(\d{1,2})(-\d{2}-\d{2}-\d{2})?-[a-f0-9]+$")
+
+
+def _launch_prefix(bin_path: str, windows: Optional[bool] = None) -> list[str]:
+    """argv prefix that runs cursor-agent, bypassing cmd.exe when it is the Windows shim.
+
+    The installer's `cursor-agent.CMD` hands its arguments to cmd.exe (`%*`, with
+    delayed expansion on), which re-parses them — so a prompt containing `"` and `&`
+    runs a shell command on the host, whatever the sandbox says. See proc_tree's
+    batch-shim note. The shim only forwards to `cursor-agent.ps1`, which runs
+    `node.exe index.js` from the install dir if present, else from the newest
+    `versions/<YYYY.MM.DD>-<commit>/`. Doing that selection here and launching node
+    directly is the same program with cmd.exe and PowerShell taken out. Verified
+    live: `--version` and `status` answer identically both ways. Anything we can't
+    resolve falls back to the shim, where proc_tree.check_args refuses a dangerous
+    prompt instead of running it. `windows` defaults to the real platform; tests pass
+    it explicitly, since faking os.name breaks pathlib off Windows.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows or not proc_tree.is_batch_file(bin_path):
+        return [bin_path]
+    base = Path(bin_path).parent
+    flat = (base / "node.exe", base / "index.js")
+    if all(f.is_file() for f in flat):
+        return [str(f) for f in flat]
+    best: Optional[tuple[int, str]] = None
+    versions = base / "versions"
+    for d in versions.iterdir() if versions.is_dir() else ():
+        m = _VERSION_DIR_RE.match(d.name)
+        if not m or not d.is_dir():
+            continue
+        key = (int(f"{m.group(1)}{int(m.group(2)):02d}{int(m.group(3)):02d}"), d.name)
+        if best is None or key > best:
+            best = key
+    if best is not None:
+        node, entry = versions / best[1] / "node.exe", versions / best[1] / "index.js"
+        if node.is_file() and entry.is_file():
+            return [str(node), str(entry)]
+    return [bin_path]
+
+
+def _launch() -> list[str]:
+    """The argv prefix for every cursor-agent call (see _launch_prefix)."""
+    return _launch_prefix(CURSOR_BIN)
+
 
 # cursor's state home. Chats live under ~/.cursor/chats/<workspace-hash>/<chat-id>/
 # (each chat dir has meta.json + store.db). No documented override, so this is
@@ -131,8 +193,40 @@ def _spawn_kwargs() -> dict:
     shim doesn't flash a console; POSIX starts a new session.
     """
     if os.name == "nt":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+        return {
+            "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            "env": _env(),
+        }
     return {"start_new_session": True}
+
+
+# Git Bash markers cursor-agent reads to pick its shell on Windows. Claude Code
+# starts MCP servers with SHELL=...\Git\bin\bash.exe (sometimes MSYSTEM/EXEPATH
+# too), and cursor-agent then runs its Shell tool and hooks in Git Bash while still
+# generating PowerShell syntax, so every shell step fails (issue #6). In the
+# 2026.09.28 bundle, a SHELL matching git…bash.exe or any MSYSTEM selects bash, and
+# the hook runner spawns `$SHELL -c`; with all three gone it falls back to pwsh,
+# the same as a cursor-agent started from a PowerShell terminal.
+_GIT_BASH_ENV_KEYS = ("SHELL", "MSYSTEM", "EXEPATH")
+
+
+def _env() -> dict:
+    """Process env carrying what cursor-agent.ps1 would have set.
+
+    Needed now that _launch_prefix runs node directly instead of the ps1: the
+    launcher records how it was invoked and points node's compile cache at a fixed
+    dir (without it every call recompiles). Both are setdefault, so a value the user
+    exported still wins. The Git Bash markers inherited from the host are dropped
+    (see _GIT_BASH_ENV_KEYS).
+    """
+    env = dict(os.environ)
+    for key in _GIT_BASH_ENV_KEYS:
+        env.pop(key, None)
+    env.setdefault("CURSOR_INVOKED_AS", os.path.basename(CURSOR_BIN))
+    local = env.get("LOCALAPPDATA")
+    if local:
+        env.setdefault("NODE_COMPILE_CACHE", os.path.join(local, "cursor-compile-cache"))
+    return env
 
 
 def normalize_workspace(ws: Optional[str]) -> str:
@@ -180,11 +274,10 @@ def create_chat(workspace: str) -> str:
     `-p --resume <id>` from that cwd, so we run create-chat with cwd=workspace for
     good measure and let the subsequent ask create the workspace's chat dir.
     """
-    proc = subprocess.run(
-        [CURSOR_BIN, "create-chat"],
+    proc = proc_tree.run_captured(
+        [*_launch(), "create-chat"],
         cwd=workspace,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
         timeout=30,
         **_TEXT,
         **_spawn_kwargs(),
@@ -308,10 +401,10 @@ def list_models() -> list[str]:
     if _MODELS_CACHE is not None:
         return _MODELS_CACHE
     try:
-        proc = subprocess.run(
-            [CURSOR_BIN, "models"],
+        proc = proc_tree.run_captured(
+            [*_launch(), "models"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=20,
             **_TEXT,
             **_spawn_kwargs(),
@@ -384,7 +477,7 @@ def build_args(
     last.
     """
     args = [
-        CURSOR_BIN,
+        *_launch(),
         "-p",
         "--output-format",
         "stream-json" if json_stream else "text",
@@ -422,11 +515,10 @@ def run_cursor(
     chat_id = _resolve_session(workspace, continue_conv)
     args = build_args(prompt, workspace, sandbox, model, chat_id)
 
-    proc = subprocess.run(
+    proc = proc_tree.run_captured(
         args,
         cwd=workspace,
         stdin=subprocess.DEVNULL,
-        capture_output=True,
         timeout=timeout_s + 30,
         **_TEXT,
         **_spawn_kwargs(),
@@ -495,7 +587,7 @@ def run_cursor_streaming(
     args = build_args(prompt, workspace, sandbox, model, chat_id, json_stream=True)
 
     state: dict = {"answer": "", "assistant": ""}
-    proc = subprocess.Popen(
+    proc = proc_tree.popen(
         args,
         cwd=workspace,
         stdin=subprocess.DEVNULL,
@@ -541,8 +633,11 @@ def run_cursor_streaming(
         proc.wait(timeout=timeout_s + 30)
     except subprocess.TimeoutExpired:
         timed_out = True
-        proc.kill()
-        proc.wait()
+        proc_tree.kill_tree(proc)  # the grandchild must die too — see proc_tree
+        try:
+            proc.wait(timeout=proc_tree.REAP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            pass  # reaped or not, the caller's deadline stays real
     ot.join(timeout=1)
     et.join(timeout=1)
 
@@ -570,10 +665,10 @@ def run_cursor_streaming(
 def cursor_version() -> Optional[str]:
     """`cursor-agent --version` first line, or None if cursor can't be run."""
     try:
-        proc = subprocess.run(
-            [CURSOR_BIN, "--version"],
+        proc = proc_tree.run_captured(
+            [*_launch(), "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=15,
             **_TEXT,
             **_spawn_kwargs(),
@@ -593,10 +688,10 @@ def auth_status() -> tuple[bool, str]:
     command can't run.
     """
     try:
-        proc = subprocess.run(
-            [CURSOR_BIN, "status"],
+        proc = proc_tree.run_captured(
+            [*_launch(), "status"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             timeout=20,
             **_TEXT,
             **_spawn_kwargs(),
@@ -606,6 +701,11 @@ def auth_status() -> tuple[bool, str]:
     out = ((proc.stdout or "") + (proc.stderr or "")).strip()
     # Strip a leading status glyph (e.g. "✓ ") so the detail reads cleanly.
     first = out.splitlines()[0].lstrip("✓✔✅✗✘ \t").strip() if out else ""
+    if "unable to fetch user details" in out.lower():
+        # Seen live on 2026.08.11 with a stale saved login: status still prints
+        # "✓ Login successful!" over "Logged in (unable to fetch user details)",
+        # while every -p run exits 1 with "Authentication required".
+        return (False, "saved login looks expired (run `cursor-agent login`)")
     if "logged in" in out.lower():
         return (True, first or "logged in")
     return (False, first or "not logged in (run `cursor-agent login`)")

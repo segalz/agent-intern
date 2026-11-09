@@ -10,6 +10,861 @@ summary.
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-11-09
+
+### Added
+
+- **A Claude Code backend: `claude_ask`, `claude_continue` and `claude_status`, for hosts other than
+  Claude Code.** An Antigravity, Codex, Copilot, Cursor or opencode session can now delegate to
+  Claude Code on your own Claude login (`claude auth login`) or an `ANTHROPIC_API_KEY`; `agent_swarm`
+  takes `backend: "claude"` too (aliases `claude-code` and `anthropic`). **Inside Claude Code the
+  tools are hidden automatically**, since the server sees `CLAUDECODE=1` and delegating to yourself
+  spends the same quota twice; name `claude` in `AGENT_INTERN_BACKENDS` to turn them on anyway, and
+  the status tools' `backends` row says which case you are in. That makes 32 tools, or 29 inside
+  Claude Code. `read-only` (the default) reads and searches files: no Write, Edit or Bash.
+  `workspace-write` confines file edits to the workspace and runs **no shell**, so it can't run
+  tests or builds. `danger-full-access` skips every permission check and is **not verified live**.
+  All three are enforced by Claude Code itself and none is an OS boundary for file edits. `model`
+  takes an alias (`haiku`, `sonnet`, `opus`, `fable`) or a full id. `CLAUDE_BIN` overrides the
+  binary; claude 2.1.259 or newer is needed. `claude_status` shows the version and how you're
+  signed in (method, plan, login expiry), never your e-mail or organisation. Verified live on
+  claude 2.1.319 / Windows: hidden in Claude Code (29 tools), present in the Antigravity CLI (32
+  tools, `claude_ask` answered; `claude_status` answered in Copilot CLI, Cursor CLI and opencode
+  too), the `read-only` and `workspace-write` behaviour above. Not in this
+  release: a usage or limits row (there is no free way to read it); a run that hits the plan's limit
+  says so in its error.
+- **`agent-intern rules` prints the routing guide.** It is byte for byte the server's MCP
+  instructions for the backends `AGENT_INTERN_BACKENDS` leaves on, as UTF-8, to paste into the rules
+  file of a host that doesn't show MCP instructions to its model (the agy CLI; Copilot without
+  `--allow-all-mcp-server-instructions`; opencode is unconfirmed). Run it as
+  `uvx agent-intern rules > AGENTS.md`: agy, Copilot CLI, Cursor CLI and opencode all read that
+  file (measured; home-level rules files weren't tested).
+- **A nesting limit across every backend.** Each agent agent-intern starts gets
+  `AGENT_INTERN_DEPTH` one higher, and a copy of agent-intern two agents deep refuses to start
+  another, with a clear message, so agents can't recurse without end. A backend that loads
+  agent-intern can delegate one level further, and no deeper.
+- **`agent-intern doctor` checks Claude Code** along with the other backends.
+
+### Changed
+
+- **The server's guidance now fits every host.** The MCP instructions shrank from 5,062 to 3,407
+  characters, so Claude Code (which cuts them at 4,096) no longer truncates them: the offer trigger,
+  the backend picker and the `workspace` rule come first and the security note last. Every tool
+  description now leads with when to use the tool and carries the `workspace` rule, and parameter
+  notes are held to 600 characters; the detail that moved out (the `schema`, `plan` and `model`
+  notes, the Windows codex caveat, the `agent_swarm` backend aliases and per-backend sandbox notes)
+  is in [docs/tools.md](docs/tools.md).
+- **Re-verified on agy 1.5.3. No break.** Ask, continue, an image, a two-worker swarm and the
+  timeout error ran through this release's code.
+
+## [0.35.0] - 2026-11-09
+
+### Added
+
+- **`agent-intern doctor` checks your setup from the terminal, with no MCP host.** It runs the same
+  checks as the `*_status` tools for every backend that `AGENT_INTERN_BACKENDS` leaves on, and
+  prints each backend as `ready`, `warning` or `unusable` with the next step to fix it. It spends
+  no quota, and does what `/agent-intern:doctor` does in any host (Antigravity included) or in a
+  plain terminal: `uvx agent-intern doctor`. `--verbose` shows every check and `--json` prints the
+  result as JSON. The exit code is 0 when at least one backend is usable, 1 when none is, and 2 on
+  a usage error. Paste its output into a bug report.
+- **`agent-intern --version` / `-V`** prints the bridge version.
+- **doctor masks more than your home directory.** E-mail addresses show as `<email>` and API keys
+  with a known prefix as `<key>`, on top of the home directory (`~`). Read its output before you
+  post it anyway.
+- **opencode 2.x is supported (`npm i -g @opencode/cli`).** The sandbox uses 2.x's permission rules
+  (an ordered rule list in `OPENCODE_CONFIG_CONTENT`) and a private `--standalone` server, so the
+  per-run fence isn't ignored by the shared background service. 1.x keeps working; any other major
+  version, or one the bridge can't read, is refused with a clear message instead of running
+  unfenced. **On 2.x, `workspace-write` keeps file edits inside the workspace** (verified: an edit
+  to a subdirectory was written; `../x` and absolute paths outside were refused), **but shell
+  commands are not confined**: they can write anywhere your user can and read `.env` files. The edit
+  tool can also write a `.env` file inside the workspace; only reading one is blocked.
+  `read-only` blocks edits, shell, subagents and web. The read tool is refused `.env` and
+  `.env.local` in both modes. Checked live on opencode 2.2.5 / Windows
+  with free models; not checked on 2.x: `--auto`, macOS/Linux and a configured provider key. `opencode_status`
+  reads the credentials row from `opencode auth list` on 2.x, and `agent-intern doctor` recommends
+  the 2.x package.
+- **codex: a `workspace-write` request that codex silently ran read-only now gets a warning.** On
+  Windows, codex drops `workspace-write` to read-only unless a Windows sandbox is configured
+  (`sandbox = "unelevated"`, `"elevated"` or `"mxc"` under `[windows]` in `~/.codex/config.toml`).
+  When the sandbox codex reports differs from the one requested, `codex_ask`, `codex_continue` (fresh
+  runs) and codex swarm workers append an `[agent-intern] WARNING` with that hint. `codex_status`
+  gains a `windows sandbox` row on Windows (`configured: <value>` or `not configured`; never a
+  failure). The bridge does not set the key itself. Checked on codex-cli 0.166.0 by what codex
+  reports; a real write under the setting is not yet checked.
+
+### Changed
+
+- **agy's `model` also takes a family name without the effort suffix.** `model="gemini-4-argon"`
+  runs the family at its default effort, so `gemini-4-argon-high` is no longer the only way to name
+  it. Verified live on agy 1.5.1 for `gemini-4-argon` and `gemini-3.8-flash`. A typo is still
+  rejected up front.
+- **Tool docstrings and docs use a Gemini model in agy examples** (`gemini-4-argon-high`) instead
+  of a Claude one.
+- **opencode 2.x: status and model checks no longer leave opencode's background service running.**
+  On 2.x, `opencode models` and `opencode auth list` start the shared service; the bridge now passes
+  the global `--standalone` before them.
+- **opencode: an upgrade is picked up without restarting the server.** One that changes the
+  installed version or moves the binary (`opencode-ai` → `@opencode/cli`) is noticed on the next
+  call. An explicit `OPENCODE_BIN` pointing at a path that no longer exists now gets a clear error.
+- **opencode: an `OPENCODE_CONFIG_CONTENT` that isn't plain JSON (JSONC, say) is replaced for fenced
+  runs**, with a warning in the server log.
+- **opencode: a run the sandbox fenced into silence now says so**, instead of a bare "no text"
+  error.
+- **opencode's free models are no longer described as slow.** On opencode 1.19.5 six free models
+  answered a short prompt in 2.5–6.5 s (the default one in 4.8 s), and 1.4–2.8 s on 2.x, so the README, FAQ,
+  tool reference and tool descriptions drop "slow" and "allow minutes". The 300 s default timeout
+  stays, now only a ceiling.
+- **CI also tests Python 3.14 and 3.15**, and the package metadata lists them.
+- **Docs only:** the README gains a "Works in" section (Claude Code, the Antigravity CLI, Copilot CLI, Cursor CLI and opencode), a demo
+  animation under Quick start, a "by hand vs. with agent-intern" table, a where-to-start line, a
+  card banner (`assets/card.svg`) and a refreshed social preview; the FAQ
+  now covers opencode and Muse in its backend, terms-of-service and cost answers and opens its
+  backend question with a start-here paragraph; the bug-report template asks for the backend, CLI
+  version and `agent-intern doctor` output instead of agy details only; the example custom preset
+  is now a proposal review panel; and the repository gains a `SECURITY.md` and a Code of Conduct
+  (Contributor Covenant 2.1).
+
+### Fixed
+
+- **agy 1.5 timeouts in image swarm workers and watched image runs are reported as timeouts**, not
+  as "no image file produced". A serialized image worker no longer hides agy's own error.
+- **codex: the sandbox-downgrade warning also works when codex prints no header.** The bridge reads
+  the session's rollout instead, and finds it by file name rather than by scanning every session.
+- **agy 1.5: a `--print-timeout` that exits 3 is reported as a timeout again, with the partial
+  answer.** agy 1.5.0 made an expired print timeout exit 3 (it exited 0 before). Ask, continue, watch
+  mode and Antigravity swarm workers now report it as a timeout and attach the partial answer.
+
+## [0.34.0] - 2026-11-02
+
+### Changed
+
+- **A quota failure now says which model family is out, and which still has quota
+  ([#7](https://github.com/SinanTufekci/agent-intern/issues/7)).** agy counts quota per model
+  family, but a call that hit a limit came back as a bare `agy exited 1 … Individual quota
+  reached`, which a calling agent read as "agy is out of quota". When agy's output reads like a
+  quota or rate-limit error, the error now carries agy's `/usage` table (free to read), the family
+  the call drew on, and a model from a family that still has quota, e.g.
+  `retry with … Gemini Models (e.g. model="gemini-3.8-flash-high")`. Covers ask and continue,
+  watched or not, and antigravity swarm workers. One `/usage` read serves a burst of failures.
+- **Re-verified on agy 1.4.12.** No break. The bridge also reads 1.4.11's `finished_reason`: a turn
+  agy reports as cut short (`print_timeout`, `interrupted` or `error`) is an error with the
+  partial answer attached, never returned as a whole answer. The new `gemini-4-argon` family is
+  documented; with nothing set in `settings.json`, agy now defaults to Gemini 4 Argon (Medium).
+
+### Fixed
+
+- **`antigravity_status` reported `newest transcript [!!]` and `PROBLEMS FOUND` while everything
+  worked ([#8](https://github.com/SinanTufekci/agent-intern/issues/8)).** It read only the newest
+  conversation, which is often empty (left by an agy self-update), still running, or a failed turn.
+  It now reports the newest conversation with a readable answer, says how many newer ones it
+  skipped, and fails only when none of the ten newest is readable and one of those is neither
+  empty nor still running.
+- **An antigravity image swarm worker that hit a quota limit reported "no image file produced".**
+  It now passes agy's error on, with the quota note above.
+- **`agent_swarm(watch=true)` wrote a line into the MCP protocol stream.** Opening or reusing the
+  swarm dashboard printed its URL to stdout, which is the JSON-RPC channel, so the host received a
+  line that was not JSON-RPC, carrying the dashboard's access token. It now goes to the debug log
+  on stderr (`AGY_BRIDGE_DEBUG`), without the token.
+
+## [0.33.0] - 2026-10-14
+
+### Added
+
+- **`AGENT_INTERN_BACKENDS` keeps the backends you don't use out of Claude's context.** All 29
+  tools' descriptions and the routing guide come to about 15,500 tokens in every session, whether
+  or not you have the CLIs behind them. List the backends you use, say
+  `AGENT_INTERN_BACKENDS=antigravity,codex`, and the server leaves the rest out: their tools, and
+  their part of the routing guide, which never names a tool the server dropped. That example comes
+  to 11 tools and about 7,500 tokens; `codex` alone, to 6 tools and about 4,000. Unset, nothing
+  changes. A swarm or preset worker on a backend that's off fails in place without launching it,
+  like one whose CLI isn't installed, so a panel with one member off still runs the rest. Every
+  remaining `*_status` gains a `backends` row with what is on and off, flagging any name that
+  matched no backend; if none matches, every backend stays on rather than none.
+  [How →](docs/setup.md#load-only-the-backends-you-use)
+
+### Changed
+
+- **fastmcp 4 is allowed.** The dependency was capped below 4 until the server was verified on
+  it. On fastmcp 4.1.0 the full unit suite passes unchanged, the tools list and answer over stdio,
+  a live `antigravity_ask` streams its progress notifications to the client, and Claude Code
+  connects. A fresh `uvx agent-intern` now resolves to 4.x; the cap moves to below 5.
+- **The routing guide no longer compares the backends' sandboxes in its closing security note.**
+  Each backend's own line already says what its sandbox enforces, and with backends turned off the
+  comparison would name ones that aren't there. Its example offer no longer names Gemini either.
+
+### Fixed
+
+- **The docs named Antigravity models agy no longer has.** By agy 1.3.5 the 3.7 and 3.6 Flash
+  families, Gemini 3.1 Pro, `claude-sonnet-4-6` and `claude-opus-4-6-thinking` are gone and Claude
+  Opus 5.5 and Sonnet 5.5 are in, with no changelog entry for either. A model copied from the
+  `antigravity_ask` description was rejected before it ran. The examples now name live slugs,
+  such as `claude-sonnet-5-5-high`. The bridge is re-verified on agy 1.3.5 with no code change,
+  plan mode included. [Details →](docs/status.md#status--caveats)
+- **opencode's default `read-only` mode failed on every free model.** Since early October 2026
+  opencode's free tier refuses a request without the `bash` tool (*"OpenCode's free tier can only
+  be used from within OpenCode"*). `read-only` denied `bash`, which removes it from the request, so
+  every keyless `opencode_ask` failed, on any opencode version. `bash` is now set to *ask*, which a
+  headless run rejects. That was verified live: a `bash` write under `read-only` is refused and
+  writes nothing. [Details →](docs/status.md#status--caveats)
+- **`cursor_status` called an expired Cursor login ready.** With a stale saved login,
+  `cursor-agent status` still prints *"Login successful!"* while every call fails with
+  *"Authentication required"*. The auth row now flags it and gives the login command.
+- **On Windows, an npm-installed codex or copilot couldn't take most prompts.** npm installs both
+  as a `.cmd` shim running a node script. By bare name the bridge couldn't find it (Windows looks
+  only for a `.exe`). Named in `CODEX_BIN` or `COPILOT_BIN`, it ran through `cmd.exe`, so the
+  bridge's shim check refused any prompt with `"`, `&` or `%`, which is nearly every diff. The
+  bridge now starts the native binary the shim's script would have started, as it already did for
+  opencode. Verified on codex 0.162.1 and copilot 1.0.97: a prompt with `"`, `&` and `%` answers.
+  The shim parser also now reads only the line that launches the program, so a node shim with
+  `node.exe` beside it (nvm-windows) can't be mistaken for an exe shim.
+- **The watch view of `codex_continue` showed no earlier turns** from codex 0.149.1 on, because
+  codex now records turns as `item_completed` items. Both the old and new shapes are read.
+- **Docs: verified versions** are now codex-cli 0.162.1, copilot 1.0.97, cursor-agent 2026.10.14
+  and opencode 1.19.0. The
+  Windows read-only caveat for codex still holds on 0.162.1.
+
+## [0.32.1] - 2026-09-29
+
+### Changed
+
+- **The tool list is grouped by backend.** The three swarm tools used to sit between
+  `antigravity_image` and `antigravity_image_swarm`; now the five `antigravity_*` tools come first,
+  then `agent_swarm`, `preset_swarm` and `swarm_presets`, then each other backend's. Only the order
+  changed.
+- **`server.py` is split by backend.** This is for contributors; nothing else changes for users.
+  Every backend gets a `<name>_tools.py` for its MCP tools (Antigravity's is `antigravity_tools.py`),
+  the swarm tools go to `swarm_tools.py`, and the single-run watch viewer to `watch_server.py`.
+  `server.py` drops from 5,114 to 2,673 lines and keeps the agy bridge and the shared helpers. Every
+  function, class and constant moved verbatim; the one edit is that names used from `server` became
+  `server.<name>`, and a script checked each moved one's AST against the original apart from that.
+  Tests that patched a watch-viewer internal through `server` now patch `watch_server`, where that
+  code reads it; under the tripwire, the stale patches failed loudly (one tried to launch the real
+  Chrome) instead of passing. Apart from the regrouping above, the MCP surface is unchanged: every
+  tool's name, schema, description and annotations were compared before and after, and the seven
+  other backends' `*_status` reports came out byte-identical over stdio.
+- **Unit tests can no longer start a real agent CLI or browser.** A tripwire in `conftest.py` fails
+  the test, even when the code under test swallows the error. On its first run it found seven argv
+  tests that ran the real `agy --version` wherever agy was installed, so their result depended on
+  the machine; they now pin "agy not installed", as on CI.
+
+### Fixed
+
+- **On Windows, every Cursor shell step failed when the bridge ran under Claude Code**
+  ([#6](https://github.com/SinanTufekci/agent-intern/issues/6)).
+  Claude Code starts MCP servers with `SHELL` set to Git Bash (`C:\Program Files\Git\bin\bash.exe`,
+  sometimes with `MSYSTEM`/`EXEPATH` too), and cursor-agent inherited it. cursor-agent picks its
+  shell from those variables, so it ran its Shell tool and hooks in Git Bash while still writing
+  PowerShell: shell steps came back with no output or exit status, and hooks failed with
+  `eval: syntax error near unexpected token '&'`. The bridge now drops the three variables before
+  launching cursor-agent, so it falls back to pwsh, as it does when started from a PowerShell
+  terminal. Other backends are unchanged.
+- **The MCP handshake reported fastmcp's version instead of the bridge's.** `serverInfo.version` read
+  e.g. `3.3.1`; it now carries the bridge release.
+- **A bare `pytest` in the repo root crashed before reporting anything.** It collected the live
+  `test_smoke.py`, whose stdout rewrap closed pytest's capture file. `conftest.py` now leaves it out;
+  run it by hand as before.
+
+## [0.32.0] - 2026-09-24
+
+### Added
+
+- **Preset swarms: ready-made panels of agents, run with one call.** `preset_swarm(preset,
+  material)` runs a named panel of agents from different model families, each in its own role, on
+  the same material. The same panel runs every time, so two runs can be compared. Four are built in.
+  **`jury`**: Codex, Antigravity and Copilot jurors score the material against a rubric. The bridge
+  computes the score table itself: each criterion's mean and spread, a weighted total per juror, and
+  a ⚠ where jurors are 3+ points apart. **`research`**: one topic from four angles, with sources.
+  **`red-team`**: three attackers try to break a plan. **`council`**: independent code review, now
+  what `/agent-intern:second-opinion --council` runs. `swarm_presets` lists them and hands any
+  preset back as JSON to customise. Your own presets go in `~/.agent-intern/swarms/`, where a file
+  named after a built-in replaces it. A project's presets go in `<workspace>/.agent-intern/swarms/`;
+  because those arrive with a cloned repo, they cannot replace a built-in or one of yours, and their
+  members cannot ask for more than read-only. Every member runs read-only by default, works without
+  seeing the others, and is told to treat instructions inside the material as data.
+
+### Changed
+
+- **The watch windows were redesigned.** They keep the same dark green-and-cyan look, but no
+  longer read like a terminal. Text is now sans-serif, with monospace kept for commands and code.
+  Each backend is shown by its own logo, which heads the window and marks the agent's side of the
+  chat. Claude's prompts carry Claude's. The logos come from the MIT-licensed LobeHub icon set, and
+  its licence ships alongside them in `watch_ui.py`. The run's state sits in a status chip with a live clock and the time
+  budget (`Working · 14.1s / 3m00s`). The agent's steps form a timeline: each shows its time since
+  the start, and a command pulses while it runs, then settles to a ✓ with its duration or a red ✗
+  with the error underneath. That replaces the "command finished" line that used to follow every
+  command. Answers arrive as cards with a Copy button. They render tables, block quotes, nested
+  lists, italics and fenced code, and each code block has a language label and its own Copy button.
+  Links are still shown but not clickable, and every string is still escaped before any tag is
+  added. A failed run keeps its timeline open and marks its answer card red. The progress bar
+  turns amber past 75% of the budget, and the window title leads with the state (● ✓ ✗). If the
+  bridge goes away mid-run, the window says "Disconnected" instead of spinning forever. The swarm
+  dashboard shows one card per worker, with counters for running, queued, done and failed, and an
+  overall bar split into done and failed. The single-run window and the swarm's per-worker window
+  now share one implementation (`watch_ui.py`) instead of two hand-synced copies.
+
+### Fixed
+
+- **Watch clocks froze between steps.** The single-run window moved its clock only when a new step
+  arrived. In the swarm dashboard, every row except Antigravity's sat at 0.0s with an empty time bar
+  until its worker finished, because only the Antigravity runners report elapsed time while working.
+  The clocks now run in the page from each run's start time.
+- **The swarm dashboard's clock kept counting after the last worker finished.** It now stops at the
+  moment the last worker did.
+- **An opencode swarm row measured its time bar against the swarm's `timeout_s`**, not the raised
+  budget of at least 300 s that the worker actually gets. The bar pinned near full and would have
+  read as about to time out while opencode still had minutes left.
+- **`tools/capture_watch_gif.py` could no longer record.** It opened the viewer without the access
+  token that 0.23.1 made mandatory, so every frame it captured was a 403. Its GIF palette also
+  weighed colours by pixel count, which turned the small backend logos grey; it now keeps a slot for
+  every colour on screen. The README's three GIFs are re-recorded with the new windows.
+
+## [0.31.1] - 2026-09-24
+
+### Fixed
+
+- **On agy 1.2.0+, an Antigravity task that ran out of time came back as a finished answer.**
+  1.2.0 changed what an expired `--print-timeout` does: instead of failing, agy returns the partial
+  output it has, exits 0 and reports `"status":"SUCCESS"`. The only sign is a stderr line (*"print
+  timeout after 20s with turn in progress; returning partial output"*). The bridge passes
+  `timeout_s` as that flag and trusted the exit code, so `antigravity_ask`, `antigravity_continue`,
+  watch mode and `agent_swarm`'s Antigravity workers all returned answers that simply stopped
+  mid-sentence. Reproduced through the bridge before the fix: 5629 characters ending *"…when an
+  artisan"*, returned as the answer. A cut turn is now an error again, as it was before 1.2.0, and
+  the partial text comes along in the message, labelled as cut off. Verified live on
+  `antigravity_ask`, watch mode and a swarm worker; the watched swarm worker is covered by unit tests
+  only.
+
+### Changed
+
+- **Re-verified against agy 1.2.10 (from 1.1.25).** `VERIFIED_AGY_VERSION` → `(1, 2, 10)`. Apart from
+  the timeout above, everything the bridge depends on held across the eleven releases: ask on the
+  default model and on an explicit `--model`, continue pinning the same conversation, the
+  `--output-format json` object, the transcript read, `agy models` (catalog unchanged) and the
+  `/usage` quota table. 1.2.6's structured `AGY_ERROR` stderr line and 1.2.10's exit code 3 for a
+  turn that dies on a model error needed no change: both are non-zero exits, which already raise
+  with the stderr tail attached.
+
+## [0.31.0] - 2026-09-24
+
+### Added
+
+- **Muse Code (Meta) as an eighth backend — experimental, and the best-verified of the three.**
+  `muse_ask`, `muse_continue` and `muse_status`, plus `muse` workers in `agent_swarm` (aliases `meta`,
+  `muse-code`) and watch mode. Muse needs a paid plan or `META_API_KEY`, which the author doesn't have,
+  so a real Muse Spark answer has never come through the bridge. Unlike Grok and Kimi, though, muse
+  ships a built-in offline `--provider echo`, and with it the whole pipeline was exercised on Muse Code
+  1.3.0 rather than read off docs: the JSONL envelope and its single `run_terminal` answer, every argv
+  in all three sandbox modes, `--session-id` creating *and* resuming a session, the cross-workspace
+  resume refusal, `muse export --last` as the restart-proof continue fallback, the logged-out error,
+  and four concurrent runs. `test_muse.py` re-runs all of it against the real binary when muse is
+  installed (skipped in CI, which has none), on top of offline unit tests with fixtures copied from
+  real output.
+
+  Design choices worth knowing:
+  - **On Windows the bridge runs `muse-bin-<version>.exe` directly**, not the installer's `muse.cmd` →
+    PowerShell launcher chain. A `.cmd` hands its arguments to `cmd.exe` (the injection class 0.30.3
+    fixed), and Windows PowerShell 5.1 started from a PowerShell 7 environment can't load
+    `Get-FileHash`, which breaks the launcher's self-update (verified both ways). The cost: calls
+    through the bridge don't trigger muse's background self-update; running `muse` yourself does.
+  - **The prompt always travels in a file** (`--prompt-file`) — no argument ever carries user text,
+    and a prompt starting with `-` can't be read as a flag.
+  - **`read-only` switches the write, shell and web tools off** instead of relying on muse's OS
+    sandbox, so it holds on every platform — including Windows, where that sandbox needs a one-time
+    elevated setup that `muse_status` reports.
+  - **`--no-foreign-personal-context` on every run.** By default muse imports Claude Code's personal
+    skills and rules, which would include this bridge's own plugin.
+
+## [0.30.3] - 2026-09-24
+
+### Security
+
+- **On Windows, a prompt could run shell commands through the cursor and opencode backends —
+  upgrade if you use either there.** Both install as `.cmd` shims (the Cursor installer's
+  `cursor-agent.CMD`, npm's `opencode.cmd`), and Windows runs a `.cmd` by handing the whole command
+  line to `cmd.exe`, which re-parses every argument: `%var%` and `!var!` expansion, and `&`, `|`,
+  `<`, `>` as command separators. Python quotes arguments for the C runtime, not for `cmd.exe`, so a
+  prompt that closed a quote and continued with `& <command>` ran that command on the host —
+  **before the agent started, so no `sandbox` setting applied**. The prompt can carry text Claude
+  read from an untrusted file or page, which is what makes it exploitable rather than theoretical.
+  Verified live against both real shims with a harmless payload: the injected command ran on 0.30.2
+  and does not on 0.30.3. codex, copilot, kimi, grok and agy resolve to real executables and were
+  not affected in practice.
+
+  Two defences, since correct escaping for `cmd.exe` is only possible for some inputs (Rust's fix
+  for the same class, CVE-2024-24576, refuses the rest):
+  - **The shims are bypassed.** opencode's npm shim is resolved to the native `opencode.exe` it wraps,
+    and cursor is launched as the `node.exe index.js` its own PowerShell launcher would pick, with the
+    environment that launcher sets. Same program, no `cmd.exe`.
+  - **Whatever is left is refused, not run.** `proc_tree.check_args` rejects any `cmd.exe`
+    metacharacter bound for a `.cmd`/`.bat` with an error that names the backend's `*_BIN` override.
+    It runs inside `run_captured` and the new `proc_tree.popen`, every direct `subprocess.Popen` in
+    the bridge now goes through `popen`, and an AST test fails the build if a new one doesn't.
+
+  Details in [docs/security.md](https://github.com/SinanTufekci/agent-intern/blob/main/docs/security.md#windows-batch-file-shims-and-the-prompt).
+
+### Added
+
+- **A Claude Code plugin.** This repo is now a plugin marketplace, so
+  `claude plugin marketplace add SinanTufekci/agent-intern` then
+  `claude plugin install agent-intern@agent-intern` installs the server — through the same unpinned
+  `uvx agent-intern`, so updates stay deliberate — plus three skills:
+  - **`/agent-intern:second-opinion [--council]`** — sends the diff to a reviewer from another model
+    family, or to 2–3 in parallel through `agent_swarm`. It inlines the diff rather than trusting the
+    reviewer to read files, because Codex's read-only sandbox currently can't on Windows. Claude
+    then checks each finding against the code (agree / disagree / unsure) and ends with a verdict.
+    Where the reviewers agree independently, that comes first.
+  - **`/agent-intern:image <what to draw>`** — `antigravity_image` with a sensible save path, the
+    returned (extension-corrected) path, and a look at the result before calling it done.
+  - **`/agent-intern:doctor`** — every `*_status` in parallel, rendered as one ready / not-ready
+    table with the next step per backend. The status tools are pre-approved for it, since they spend
+    no quota.
+
+  Three tests keep the plugin honest, because skills are prose that nothing else checks:
+  every tool a skill names must be registered, `doctor`'s pre-approvals must be exactly the
+  `*_status` tools under their plugin-scoped names (derived from the manifests, not hard-coded), and
+  the plugin must launch the unpinned published package. The plugin's version joins the release
+  version-sync test, since Claude Code only offers a plugin update when that string changes.
+
+## [0.30.2] - 2026-09-24
+
+### Fixed
+
+- **0.30.1 could not start when installed from PyPI.** It introduced `proc_tree.py` — the shared
+  process-tree killer every bridge now imports at module level — and never added it to the
+  hand-maintained `py-modules` list in `pyproject.toml`, so the wheel shipped without it. Every
+  `uvx agent-intern` that resolved to 0.30.1 died on startup with
+  `ModuleNotFoundError: No module named 'proc_tree'`, before a single tool was registered. A git
+  checkout was unaffected, which is exactly why nothing caught it: the tests import from the repo
+  root, where the file exists, and CI installs the repo in editable mode, which reads the same
+  directory. Only a clean install sees what the wheel really contains.
+
+  **If uvx cached 0.30.1 for you, it will keep serving that broken copy** — the recommended install
+  never auto-upgrades. Run `uvx agent-intern@latest` once, then restart Claude Code.
+
+  Three guards, because the first one alone would still have let this through:
+  - `test_every_runtime_module_is_listed_in_py_modules` compares `py-modules` against the non-test
+    modules on disk, so a new root module fails the suite until it is packaged.
+  - A new `package` CI job builds the wheel, installs it into a clean venv and imports the server
+    from outside the checkout — the same thing `uvx` does.
+  - `publish.yml` runs that same import as the last step before the PyPI upload, so a wheel that
+    can't start can't be published.
+
+### Added
+
+- **Listed in the official [MCP Registry](https://registry.modelcontextprotocol.io/)** as
+  `io.github.SinanTufekci/agent-intern`. A new `server.json` describes the package, and
+  `publish.yml` gains a job that publishes it after each PyPI upload (GitHub OIDC, no stored
+  token). The registry proves ownership by finding an `mcp-name:` line in the README PyPI renders,
+  and `test_version_is_the_same_everywhere_a_release_writes_it` keeps that line, `server.json`,
+  `pyproject.toml` and `server.__version__` in step.
+
+### Changed
+
+- **The README is short now — about 190 lines instead of 1,700.** It leads with what the bridge is
+  for, a one-line install (`claude mcp add -s user agent-intern -- uvx agent-intern`), the watch-mode
+  GIFs and a one-table backend comparison. Everything it used to hold moved, unabridged, into
+  [`docs/`](https://github.com/SinanTufekci/agent-intern/blob/main/docs/README.md): setup, the tool
+  reference, backends in depth, watch mode & swarm, security, the FAQ, and status & caveats. Its
+  images now use absolute URLs, so they render on PyPI too — they never had.
+- **The header animation shows all five verified backends.** opencode joins Antigravity, Codex,
+  Copilot and Cursor, and the old "all 4 done" became "all 5 done". A few stale counts went with it:
+  the setup guide now says 24 tools (not 21), `agent_swarm` spans six backends (not five), and the
+  architecture diagram shows all seven CLIs.
+
+## [0.30.1] - 2026-09-15
+
+### Fixed
+
+- **Every backend's timeout was a suggestion, not a deadline — reported from the outside in
+  [#4](https://github.com/SinanTufekci/agent-intern/issues/4) by
+  [@david-aicoach](https://github.com/david-aicoach).** A bridged CLI does its real work one or two
+  process generations below the PID we hold (an npm `.CMD` shim on Windows, a node entrypoint
+  exec'ing a compiled binary on POSIX, plus whatever the agent's own shell tool spawns). Killing only
+  the top PID does not stop the work, it orphans it — and the two platforms then fail differently:
+  on POSIX the call returns on schedule while the real worker keeps running and burning quota, and on
+  Windows the call never returns at all, because the orphan still holds our stdout pipe and
+  `subprocess.run(timeout=...)` re-reads it after killing. The reporter caught the POSIX half live: a
+  single `codex_ask` left a `zsh -c` wrapper, the node `codex` entrypoint and the compiled
+  `aarch64-apple-darwin` binary all alive well past `timeout_s`, needing a manual `kill -9` on all
+  three.
+
+  **This project had already diagnosed this bug and then failed to generalise the fix.** 0.30.0 found
+  it while building the opencode bridge, measured it with a stopwatch (a 270 s timeout returning at
+  396 s), wrote `_kill_tree` and pinned it with tests — for that one bridge, because that is where it
+  showed up. The other seven spawn paths kept the broken shape, and the suite stayed green the whole
+  time. So the fix here is not a new idea; it is the 0.30.0 idea, finally applied everywhere:
+
+  - New `proc_tree.py` holds the one implementation — `kill_tree()` (`taskkill /F /T` on Windows, the
+    `start_new_session` process group elsewhere, then a plain kill that can be trusted to have run)
+    and `run_captured()`, a drop-in for `subprocess.run(capture_output=True, timeout=...)` that reaps
+    the tree *before* reading the pipes. That ordering is the fix, not a detail of it: reading first
+    is the read that never returns.
+  - **27** call sites across `codex`, `copilot`, `cursor`, `grok`, `kimi`, `opencode`, `server` and
+    `swarm` now go through it — the ask paths, the watch/streaming paths, and the `--version` /
+    `models` / `status` / `/usage` probes, which are real CLI invocations too. `opencode_bridge`'s own
+    `_kill_tree` became a thin delegation, so there is one copy rather than two drifting ones.
+  - The bare `proc.wait()` that followed each `proc.kill()` is now bounded: a survivor costs the
+    caller 15 s, never their whole session.
+
+  Three source-level guards keep it fixed, because the original miss was not a coding error but an
+  un-enforced invariant: no module may call `subprocess.run(timeout=...)`, none may call `proc.kill()`
+  directly, and every `run_captured` call must pass its bridge's `**_spawn_kwargs()` — without
+  `start_new_session` the POSIX `killpg` would signal *our own* process group and take out the server.
+  Alongside them, a live regression test reproduces the reported shape with real processes: a child
+  that spawns a grandchild outliving the deadline, asserting the grandchild is dead rather than merely
+  disowned. `test_proc_tree.py` was also added to the CI matrix's explicit file list — CI names its
+  test files one by one, so a new file is otherwise silently never run.
+
+## [0.30.0] - 2026-09-08
+
+### Added
+
+- **A seventh backend, and the first one that needs no subscription: opencode.** `opencode_ask`,
+  `opencode_continue` and `opencode_status`, plus `agent_swarm` and watch-mode support (21 tools ->
+  24). [opencode](https://opencode.ai/) is SST's open-source terminal coding agent; `opencode run
+  --format json` runs a prompt non-interactively and writes NDJSON events to stdout, so the answer is
+  read straight from the stream like Codex's and Cursor's.
+
+  What makes it worth its own slot is not another model family — it is that **it answers with zero
+  credentials configured.** opencode ships free hosted models under its own provider
+  (`opencode/*-free`), so for the first time in this project a backend's *answer path* could be
+  verified without holding a subscription. Every claim in the bridge is therefore observed on
+  opencode 1.18.29 rather than inferred: the round-trip, the session id resume, the per-directory
+  `-c` scoping (the same `-c` from a different directory starts a fresh session, not a resume), the
+  `Session not found` failure, the unknown-model error envelope, and the `opencode models` /
+  `providers list` output the status view parses. Grok and Kimi remain
+  [unverified](https://github.com/SinanTufekci/agent-intern/blob/main/docs/backends.md#experimental-backends); this one is not.
+
+  Where the flags could not be observed they were **read off opencode's own source** rather than its
+  docs: it ships as a compiled Bun binary whose bundle still embeds the JS, so the `run` command's
+  argv parser, its event writer and its permission resolution were read from the implementation and
+  then confirmed by executing them. That is how the prompt turned out to be POSITIONAL (and joined
+  with `j["--"]`, which is why the bridge passes it after a `--` separator, so a prompt starting with
+  `-` can never be parsed as a flag).
+
+- **A `sandbox` that is agent-enforced but, unlike grok's, identical on every platform.** opencode's
+  permission set is a config value, not a CLI flag, so the bridge sets `OPENCODE_PERMISSION` per run.
+  Two facts read off the bundle and then confirmed live make that a real gate rather than a
+  suggestion: in headless `run` a permission that would prompt is **auto-rejected**
+  (`if (auto) reply("once") else { println("...auto-rejecting"); reply("reject") }`), so "ask" means
+  "deny" and no call can wedge on an invisible dialog; and the config policy is merged **last** into
+  every built-in agent (`merge(defaults, agent_specific, fromConfig(config.permission))`), so the
+  bridge's policy overrides the agent's own rules. The second point is what rules out the obvious
+  shortcut: opencode's `plan` agent is described as read-only but leaves `bash` **allowed**, so
+  `--agent plan` would have been a fence in name only.
+
+  `read-only` (the default) denies `edit`, `bash`, `task`, `external_directory`, `webfetch` and
+  `websearch` and keeps the read/search tools with `.env` denied; `workspace-write` keeps opencode's
+  own defaults inside the run directory and hard-denies `external_directory`, so leaving the
+  workspace is refused rather than asked; `danger-full-access` is opencode's own `--auto`. One
+  footgun is deliberately designed around: opencode **silently ignores** an `OPENCODE_PERMISSION`
+  value it cannot parse (a debug-level warning, then no restrictions at all), so the policy is built
+  as a dict and `json.dumps`-ed, never hand-formatted, and a test asserts the round-trip.
+
+  Both modes were then A/B'd live with one prompt ("create written.txt containing HELLO") against the
+  same free model: under `workspace-write` it answered `DONE` in 428 s and the file was there; under
+  `read-only` it wrote nothing at all, spending the whole 630 s budget retrying tools it had been
+  denied. That second outcome is also why both fenced modes deny opencode's `doom_loop` retry guard —
+  its default would already be rejected in headless mode, but a user config that allowed it could
+  otherwise turn a fenced run into an unbounded loop.
+
+### Fixed
+
+- **`agent_swarm` would have reported opencode workers as broken when they were merely slow.** The
+  swarm shares one `timeout_s` across every backend and defaults it to 180 s — correct for
+  Codex/Copilot/Cursor, and wrong for a backend whose free models were measured end-to-end at 152,
+  161, 163, 166, 214, 260 and 428 seconds. Roughly half of those would have been killed mid-answer,
+  and the swarm would have blamed the worker. An opencode worker is now given at least the same
+  300 s its own tools use; the budget is only ever raised, never lowered, so an explicit generous
+  `timeout_s` still wins and a paid model just finishes early. The timeout message names the cause
+  and the fix now, instead of reporting a bare elapsed number.
+
+- **A headless-timeout hang on Windows, found by building this backend and reproduced with a
+  stopwatch.** `opencode` on `PATH` is npm's `opencode.CMD` shim, so the real `opencode.exe` is a
+  *grandchild* of the bridge's process. `subprocess.run(timeout=...)` kills only the direct child and
+  then — on its Windows branch — calls `communicate()` again, re-reading a pipe the surviving
+  grandchild still holds open. Measured: a 270 s timeout returned after **396 s**, and only because
+  the orphan was killed by hand; otherwise the call never comes back and the orphan keeps burning
+  quota.
+
+  That matters more here than it would elsewhere, because opencode's free models are queue-scheduled
+  and genuinely slow (**152 s, 214 s and 260 s** measured for one-word answers), so the timeout is a
+  path users take rather than a theoretical edge. The opencode bridge therefore runs its blocking
+  path through the same `Popen` machinery as watch mode — one implementation, one output format, no
+  `subprocess.run` timeout anywhere — and kills the whole process tree (`taskkill /T` on Windows, the
+  process group elsewhere) before returning. `timeout_s` also defaults to **300** here rather than
+  the usual 180. Two tests pin it: one asserts the timeout kills the tree, and one fails the build if
+  the blocking path ever reaches for `subprocess.run` again.
+
+## [0.29.1] - 2026-09-03
+
+### Fixed
+
+- **The startup update notice told most users to run a command they have no repo for.** The bridge
+  announces an available update in two places, and they disagreed. The `bridge version` row in
+  `*_status` — the notice a user actually sees, in chat — said `upgrade: uvx agent-intern@latest`.
+  The startup warning said *"Update with `git pull` in the repo"*, which is the **source** install
+  only; the README's recommended path is `uvx agent-intern` from PyPI, where there is no repo and no
+  `git pull` to run. One codebase, two update notices, two different commands, and the wrong one
+  aimed at the majority.
+
+  The startup warning now names the uvx upgrade first and `git pull` second, for source installs.
+  Both existing tests asserted `"git pull"` and nothing else, so the suite was actively defending the
+  wrong advice — the same shape as 0.28.0's `--skip-git-repo-check` bug, where the test pinned the
+  defect in place. They now assert the uvx command, and a new guard pins the two notices **to each
+  other** rather than to a literal spelled twice, so the next edit to either one cannot silently
+  reintroduce the drift.
+
+- **Nobody was hearing about updates at all, correct command or not.** Fixing the wording exposed the
+  bigger problem: of the two places a new release is announced, only one can reach a person. The
+  startup warning goes to **stderr**, which lands in the host's logs — the model never sees a
+  server's stderr, so Claude cannot mention what it was never shown, and a user would have to go
+  read `/mcp` logs to find it. The `*_status` row *does* reach the model, because it rides back as a
+  tool result — but only when something calls `*_status`, which in ordinary use may be never.
+
+  That leaves a user on the recommended install — `uvx agent-intern`, which pins to its cached
+  version and deliberately does **not** auto-upgrade — with no realistic way to learn an update
+  exists. The `instructions` block now closes the loop from the other end: when a `*_status` call
+  reports a newer release, the host is told to relay it to the user in one line with the upgrade
+  command. It uses the one channel that already works rather than adding a new one; notably it does
+  *not* staple the notice onto ordinary tool results, which would corrupt the validated JSON that
+  `antigravity_ask(schema=...)` returns.
+
+## [0.29.0] - 2026-09-03
+
+### Changed
+
+- **The server now tells the host model to OFFER delegation, instead of waiting to be asked.** The
+  `instructions` block every MCP client injects into its model's context described *when* delegation
+  fits and stopped there, which is a passive framing: it answers "may I?" but never prompts "should
+  I?". The practical result was that the bridge stayed invisible unless the user remembered it
+  existed and asked by name — six CLIs and a paid subscription behind them, reached only on demand.
+
+  The block now instructs the host to propose it in one line before starting a qualifying task, name
+  the backend and the reason, and **ask** — the user is paying for these plans, so a delegation they
+  never hear about is one they can never take. Two triggers were added alongside the existing ones,
+  because they are the cases that most reward a sub-agent and are easiest to miss: **bulk mechanical
+  work** (a rename across 30 files, boilerplate, a first-pass port), which is cheap for a sub-agent
+  and expensive in the host's context, and a **second opinion on a risky diff or design call**, where
+  one model family's blind spot is the entire risk.
+
+  The consent and anti-nag guardrails are part of the same change, not a footnote. The host is told
+  to ask **once per task, never once per turn**, to drop the subject for the rest of a task it was
+  declined on, and to delegate without asking only for images (the one thing it cannot do itself) or
+  where the user has already standing-approved that kind of work. It is also told explicitly *not* to
+  offer on a two-tool-call job, on work leaning on context only the conversation has, or where the
+  ~10-30s round trip costs more than doing it — a suggestion on every task is nagging, not help.
+
+  A guard test pins both halves, since each one alone is its own failure mode: "offer" without the
+  guardrail becomes a per-turn pitch or quota spent silently, and the guardrail without "offer" is
+  the old passive behaviour back again. MCP instructions are guidance rather than an enforced rule,
+  so the README's FAQ now also carries a **`CLAUDE.md` snippet** for anyone who wants this reliably
+  proactive — or, with the sentence reversed, reliably off.
+
+## [0.28.1] - 2026-09-03
+
+### Changed
+
+- **Re-verified against agy 1.1.25 (from 1.1.20) — five releases, no plumbing change, but the model
+  catalog moved in both directions.** `VERIFIED_AGY_VERSION` → `(1, 1, 25)`, so `antigravity_status`
+  stops reporting the installed agy as *"newer than verified"*.
+
+  Everything the bridge actually depends on still holds, re-checked live on Windows:
+  `antigravity_ask` round-tripped through the real argv on both the default-model path and an
+  explicit `--model`, agy's `--output-format json` object still carries
+  `conversation_id` / `status` / `response`, `agy models` still emits `<slug>\t<label>`, the `/usage`
+  quota table still parses into per-family rows, and the JSONL transcript read path still resolves.
+
+  The drift was data, not code:
+
+  - **`gemini-3.8-flash` arrived and took the default.** All three effort variants
+    (`gemini-3.8-flash-{low,medium,high}`) are live, and a bridge call passing no `model` at all now
+    answers as Gemini 3.8 Flash. agy's changelog scopes the new family to *"when connecting with a
+    `GEMINI_API_KEY`"*, but it is in the catalog on ordinary AI Pro browser auth too, and
+    `--model gemini-3.8-flash-high` round-tripped clean.
+  - **The entire `gemini-3.5-flash` family was dropped, and no changelog entry mentions it.** 1.1.22
+    was still naming 3.5 Flash in a fix note, so this is the same class of silent catalog change as
+    the 1.1.11 TSV break — every `gemini-3.5-*` example in these docs had quietly become a guaranteed
+    rejection for anyone who copied one.
+
+  Nothing broke, because `validate_model` reads the live list rather than a baked-in one. The two
+  guard tests added after the last catalog drift are what caught this, one per direction:
+  `test_documented_model_slugs_still_accepted_by_live_agy` failed on the dropped 3.5 slug and
+  `test_live_agy_model_families_are_all_documented` failed on the undocumented 3.8 family. Docstrings,
+  the README model list, and `DOCUMENTED_AGY_MODELS` now name 3.8 and no longer name 3.5.
+
+  Also recorded, though nothing had to move. Two upstream fixes in this range landed directly on
+  shapes this bridge relies on, and both moved *toward* it: **1.1.23** fixed subcommands such as
+  `models` hanging on an inherited, unclosed stdin — precisely the hang `list_agy_models` has always
+  spawned with `stdin=DEVNULL` to dodge, so that workaround is now belt-and-braces rather than
+  load-bearing (it stays, for older agy) — and **1.1.24** fixed headless runs with piped
+  stdout/stderr hanging *on exit* by setting `FD_CLOEXEC`, which is the shape of every call this
+  bridge makes (`capture_output=True`) and was a live timeout risk absorbed until now only by the
+  subprocess timeout. One false alarm to know about: agy leaves an **empty conversation directory**
+  behind when it self-updates (no transcript, just empty `.user_uploaded/` and `scratch/`), and
+  `antigravity_status` reports it as `newest transcript [!!]`; the read path is fine, and the next
+  real call writes a transcript and turns the row green.
+
+  Not adopted, and not exercised beyond confirming agy still lists them: 1.1.22's `/model <name>`,
+  1.1.21's `/voice` and status-line `cost` field, and the `always-proceed` permission mode. The
+  bridge's `--dangerously-skip-permissions` posture is unchanged.
+
+## [0.28.0] - 2026-08-25
+
+### Fixed
+
+- **`codex_continue` failed outside a git repository.** `codex exec resume` enforces codex's
+  trusted-directory check exactly like a fresh run, and `build_args` passed `--skip-git-repo-check`
+  only on the fresh path — on the reasoning that resume inherits the session's recorded cwd and
+  sandbox. A continue in a plain directory therefore died with *"Not inside a trusted directory and
+  --skip-git-repo-check was not specified"*, moments after the fresh ask that created that very
+  session had succeeded. It only bit outside a git repo, which is why hermetic tests and everyday use
+  inside a project never caught it — and the test covering that argv actively asserted the flag was
+  absent, so the suite was defending the bug. `codex exec resume --help` lists the flag; the fix is
+  the supported one. Verified live on codex 0.149.1: ask then continue in a non-git workspace both
+  answer.
+
+### Added
+
+- **The bridge now surfaces commands codex's sandbox refused.** Re-verifying against **codex 0.149.1
+  / Windows** found that every command is rejected under *both* `read-only` and `workspace-write`
+  (down to `pwd`) with `rejected: blocked by policy` — codex's policy engine cannot classify the
+  `pwsh -Command <...>` wrapper codex itself builds. Shell commands are how codex reads files, so a
+  sandboxed run sees nothing of the workspace **and answers anyway**: asked for the version in a
+  local `pyproject.toml` declaring `0.27.0`, it web-searched and returned `1.2.0` from an unrelated
+  GitHub repository (another run: `0.1.0`); with the sandbox off, `0.27.0`. Exit 0 and a full `-o`
+  file every time. Known upstream (openai/codex #40060, #38886) and not local — this machine's
+  `config.toml` carries no exec policy.
+
+  A CLI that reports success cannot be fixed from here, but it should not be laundered either, so any
+  answer whose run had commands refused now carries a visible `[agent-intern] WARNING` naming the
+  count and the sandbox. It **appends rather than raises**: under `read-only` a model that tries to
+  write is supposed to be blocked, and that run's answer is fine — the problem was never the refusal,
+  it was the silence.
+
+### Changed
+
+- **Closed the standing cursor verification gap, on the same cursor-agent 2026.07.23.** The bridge
+  shipped saying a live agent turn could not be re-verified there — the Cursor account was at its
+  usage limit — so the run path was confirmed only structurally. It has now been exercised
+  end-to-end: an ask read a workspace file and answered from it, a continue resumed the pinned chat
+  and recalled it, and a `read-only` run refused to write ("I'm in Ask mode … I can't create or write
+  files") with no file created, so cursor's agent-enforced mode holds in practice and not just in
+  `--help`. Every model id the docs name still validates; the catalogue has grown from 193 ids to 204
+  with no CLI release, which is why `cursor-agent models` stays the only current answer.
+
+- **Re-verified codex on 0.149.1 (from 0.144.1) and copilot on 1.0.80 (from 1.0.69).** Badges bumped.
+  Neither CLI self-updates, so nothing broke on an existing install — the exposure was to anyone
+  installing today. codex 0.147.0 removed `codex exec --full-auto`, which this bridge never passed.
+  For copilot the one entry that could have reached the bridge was 1.0.71's *"reject malformed
+  `--allow-tool` and `--deny-tool` patterns"*, since read-only mode **is** a pair of `--deny-tool`
+  patterns: re-verified live that they still parse, that a workspace read answers, and that a write
+  is still refused. 1.0.79's BREAKING `allowDevToolCaches` → `allowDevToolAccess` rename is a config
+  key this bridge never reads.
+
+
+## [0.27.0] - 2026-08-25
+
+### Added
+
+- **`plan=True` on `antigravity_ask` / `antigravity_continue` — the first Antigravity restriction
+  that actually holds.** It maps to agy's `--mode plan` (1.1.12+): agy investigates and writes an
+  implementation plan into its own directory instead of editing files or running commands, while
+  file reads keep working. That combination is what makes it worth having — `--sandbox` and 1.1.3's
+  headless permission gate both restrict by breaking the run, and this one doesn't.
+
+  Verified on agy 1.1.20 through the bridge's own code path, **with a control**, because "no file
+  appeared" proves nothing on its own: the identical prompt — run `cmd /c echo SHELLRAN >
+  <absolute path>` — **executed and created the file** on a normal call, and created nothing under
+  `plan=True`, which answered with a plan document. It holds even though the bridge still passes
+  `--dangerously-skip-permissions`, and even when the prompt insists ("do it now", "do not plan it").
+
+  Three things it deliberately is not:
+  - **Not an OS boundary.** It constrains agy's agent loop, so it is agent-enforced like Copilot's
+    and Cursor's modes. Treat it as a strong default for "read this repo, don't touch it", not as a
+    boundary against a hostile prompt — `codex_ask(sandbox="read-only")` is the real one.
+  - **Not silently best-effort.** Below agy 1.1.12 `--mode` parses and is then ignored in print mode,
+    so a plan request there would return a fully-empowered run reporting success. The bridge
+    **refuses** instead. Every other version gate here degrades to a lesser-but-safe path; a
+    restriction cannot.
+  - **Not compatible with the slash-command shield.** agy disables plan mode when
+    `--disable-slash-commands` is present (it warns, then runs unrestricted), so the bridge drops
+    that flag for plan calls and enforces the equivalent client-side: a prompt whose first token is a
+    single-segment slash command is rejected up front, while a POSIX path like `/etc/hosts …` still
+    passes. `AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1` opts out, as it already did.
+
+  Not wired into `agent_swarm` or `antigravity_image` yet: the swarm's task schema is shared across
+  six backends, and image generation exists to write a file.
+
+- **`agent_swarm` honours `sandbox` on Antigravity workers.** Every other backend took a per-task
+  `sandbox` policy and Antigravity dropped the key on the floor, so
+  `{"backend": "agy", "sandbox": "read-only"}` described a fenced worker and ran an unrestricted one.
+  Now `"read-only"` maps to plan mode, `"danger-full-access"` names the unrestricted posture out
+  loud, and `"workspace-write"` raises rather than implying a write scoping agy does not have.
+
+  Verified live on 1.1.20 in the parallel isolated-HOME path — which builds its own argv instead of
+  going through `_run_agy`, so plan had to be threaded through all four worker functions — with both
+  workers in one swarm running the same `cmd /c echo RAN > <absolute path>`: the fenced worker
+  created nothing and returned a plan, the unfenced one created its file. The version gate and slash
+  guard run at task-normalization time, so a bad request fails the swarm up front rather than N calls
+  in.
+
+  **An omitted `sandbox` still leaves an Antigravity worker unrestricted**, unlike every other
+  backend. Flipping that default would silently turn existing file-writing swarm tasks into plan
+  documents, so it is left alone and documented instead.
+
+- **`schema` on `antigravity_ask` / `antigravity_continue` — structured output instead of prose.**
+  Pass a JSON Schema (an object, or its JSON text) and the tool returns agy's validated
+  `structured_output` as JSON text, via agy 1.1.8's `--json-schema`. The schema goes across as inline
+  argv rather than a temp file, so there is nothing to quote and nothing to clean up. `response` on
+  the same run is deliberately NOT used as a fallback: verified on 1.1.20 that it carries the model's
+  raw emission plus agy's internal `toolAction` / `toolSummary` keys, and sometimes a line of prose
+  ahead of the JSON. A run that yields no structured output raises, since the caller is about to
+  parse what comes back. Gated on `supports_json_output()` — 1.1.8 shipped `--json-schema` and the
+  result object together — and refuses below it rather than silently answering in prose.
+
+  **Read the caveat before using it for a judgment.** agy fills the schema in a finishing pass that
+  does not reason about the content again, so a field the turn never established is guessed from the
+  schema's shape. Classifying "this broke my build and wasted my whole afternoon" with
+  `enum: ["positive","negative"]` returned **positive** in 3 runs of 4; reversing the enum to
+  `["negative","positive"]` returned **negative** in 2 of 2. Adding a `reason` field did not help —
+  it came back "Completed sentiment classification task." Asking the prompt to state the verdict and
+  why, with the original biased enum, was correct 3 of 3. Use `schema` to shape an answer the turn
+  has already produced; don't delegate the thinking to it. Documented in the tool docstring and the
+  README.
+
+- **A guard test for the drift that got through.** `test_documented_model_slugs_still_accepted_by_live_agy`
+  only ever noticed a model agy *dropped*, which is why a whole new model family and a moved default
+  sailed past a fully green suite. `test_live_agy_model_families_are_all_documented` now fails when
+  `agy models` offers a family the docs don't mention. It compares families rather than slugs, since
+  the docs deliberately name only the `-high` variant of each, and skips where agy isn't installed so
+  CI stays green.
+
+### Changed
+
+- **Re-verified against agy 1.1.20** (was 1.1.12), so `VERIFIED_AGY_VERSION` moves to `(1, 1, 20)`
+  and the startup/status "newer than verified" warning stops firing on a current agy. No code change
+  was needed: ask and continue both round-tripped through the real argv, the `--output-format json`
+  object still carries `conversation_id` / `status` / `response`, `agy models` still emits
+  `<slug>\t<label>`, the `/usage` quota table still parses, and every version gate resolves true.
+
+  Two upstream changes moved *toward* the bridge rather than away. **1.1.18** made a valueless `-p`
+  and a stray trailing argument hard errors — exactly the mis-parse `_agy_base_args`' ORDER MATTERS
+  note exists to avoid, now enforced by agy instead of failing silently (re-verified with a prompt
+  whose first character is a dash). And print-mode **exit codes got honest in both directions**:
+  1.1.18 made a dropped agent stream exit non-zero instead of reporting a clean success with an empty
+  response, while 1.1.20 stopped treating benign tool errors and permission denials as fatal. The
+  bridge raises on any non-zero exit, so both sharpen a signal it already trusted.
+
+- **Docs: agy's default model moved to `gemini-3.7-flash-high`.** agy grew the `gemini-3.7-flash`
+  family and put the default on it, so an untouched install no longer runs the
+  `gemini-3.6-flash-high` that every docstring, the README, and the tool help all named. Verified on
+  a throwaway profile with no `settings.json` at all. Nothing broke — `validate_model` reads the live
+  `agy models` list rather than a baked-in one — but a caller reading the tool docs was reasoning
+  about the wrong model, and the README badge was staler still at 1.1.10.
+
 ## [0.26.0] - 2026-08-13
 
 **Two new backends — and both are unverified.** Grok Build (xAI) and Kimi Code (Moonshot) join
@@ -1168,7 +2023,24 @@ caller might copy becomes a guaranteed rejected call.
 
 - **BREAKING:** `antigravity_ask_stream` (superseded by watch mode).
 
-[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.26.0...HEAD
+[Unreleased]: https://github.com/SinanTufekci/agent-intern/compare/v0.36.0...HEAD
+[0.36.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.35.0...v0.36.0
+[0.35.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.34.0...v0.35.0
+[0.34.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.33.0...v0.34.0
+[0.33.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.32.1...v0.33.0
+[0.32.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.32.0...v0.32.1
+[0.32.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.31.1...v0.32.0
+[0.31.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.31.0...v0.31.1
+[0.31.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.30.3...v0.31.0
+[0.30.3]: https://github.com/SinanTufekci/agent-intern/compare/v0.30.2...v0.30.3
+[0.30.2]: https://github.com/SinanTufekci/agent-intern/compare/v0.30.1...v0.30.2
+[0.30.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.30.0...v0.30.1
+[0.30.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.29.1...v0.30.0
+[0.29.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.29.0...v0.29.1
+[0.29.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.28.1...v0.29.0
+[0.28.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.28.0...v0.28.1
+[0.28.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.27.0...v0.28.0
+[0.27.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.1...v0.26.0
 [0.25.1]: https://github.com/SinanTufekci/agent-intern/compare/v0.25.0...v0.25.1
 [0.25.0]: https://github.com/SinanTufekci/agent-intern/compare/v0.24.0...v0.25.0

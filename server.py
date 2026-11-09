@@ -23,7 +23,8 @@ must have logged in interactively at least once via the Antigravity IDE or
 `agy -i`. Uses the same AI Pro quota. The bridge itself only does cross-
 platform filesystem reads under `~/.gemini/antigravity-cli/`.
 
-Model: defaults to agy's settings.json "model" field (e.g. gemini-3.6-flash-high).
+Model: defaults to agy's settings.json "model" field, and to agy's own default
+where that is unset (Gemini 4 Argon (Medium) on agy 1.4.12 and 1.5.1, checked in a clean HOME).
 agy 1.0.5 added a --model flag (and a `models` subcommand); through
 ~1.0.14 switching to a DIFFERENT model in -p HUNG the call (verified on 1.0.5:
 the active label returned in seconds, any other hung >60s), so the bridge kept
@@ -43,22 +44,47 @@ unchecked. `agy models` itself must be
 run with stdin closed (it blocks on an interactive terminal otherwise), same as
 -p is spawned with DEVNULL stdin.
 
-Model SLUGS (agy 1.1.5, list re-checked live on 1.1.12) — the label format CHANGED
+Model SLUGS (agy 1.1.5, list re-checked live on 1.5.1) — the label format CHANGED
 and every old example is now invalid. 1.1.5 introduced "stable, user-facing model
 slugs" that the /model picker shows and --model accepts, and `agy models` emits
 those slugs (bare through 1.1.10; as `<slug>\t<human label>` from 1.1.11 on — see
-_parse_models_output). The live list (re-read on 1.1.12, unchanged since 1.1.6) is:
-gemini-3.6-flash-{low,medium,high},
-gemini-3.5-flash-{low,medium,high}, gemini-3.1-pro-{low,high}, claude-sonnet-4-6,
-claude-opus-4-6-thinking, gpt-oss-120b-medium — 1.1.6 ADDED the gemini-3.6-flash
-family and moved the settings.json default to Gemini 3.6 Flash (High) (verified
-live; both the default path and `--model gemini-3.6-flash-high` round-tripped
-clean, and the JSONL + SQLite read paths still match its unchanged schema). The old
-human labels ("Gemini 3.5 Flash (High)", "Claude Sonnet 4.6 (Thinking)") are GONE
-from the list, so
+_parse_models_output). The live list (re-read on 1.5.1) is:
+gemini-4-argon-{low,medium,high}, gemini-3.8-flash-{low,medium,high},
+claude-opus-5-5-{low,medium,high}, claude-sonnet-5-5-{low,medium,high},
+gpt-oss-120b-medium. 1.1.6 ADDED the gemini-3.6-flash family and moved the
+settings.json default to it, the gemini-3.7-flash family arrived by 1.1.16 and
+took the default in turn, and 1.1.25 added gemini-3.8-flash and moved the default
+onto THAT (verified live through this bridge: a call passing no `model` at all
+answered "Gemini 3.8 Flash"). Somewhere between 1.2.11 and 1.3.5 the catalog
+shrank: gemini-3.7-flash, gemini-3.6-flash, gemini-3.1-pro, claude-sonnet-4-6 and
+claude-opus-4-6-thinking went, the two Claude 5.5 families came in, each with
+three effort variants, and no changelog entry says so. The default stayed on
+Gemini 3.8 Flash (High). By 1.4.12 the gemini-4-argon family had arrived, and
+with no model in settings.json agy now picks Gemini 4 Argon (Medium).
+
+Two things about the 3.8 arrival are worth keeping. Its changelog entry scopes it
+to "when connecting with a `GEMINI_API_KEY`", but it is in the catalog on the
+ordinary AI Pro browser-auth path too — `agy models` lists all three effort
+variants there, and `--model gemini-3.8-flash-high` round-tripped clean through
+the bridge. And the same release quietly DROPPED the entire gemini-3.5-flash
+family, which NO changelog entry mentions (1.1.22 still named 3.5 Flash in a fix,
+and it was live on 1.1.20), so every 3.5 example in these docs had silently become
+a guaranteed rejection. Neither move needed a code change, because validate_model
+reads the live list rather than a baked-in one; what rots is precisely this
+paragraph, and a docstring naming a superseded default is how a caller ends up
+reasoning about the wrong model. That rot is what DOCUMENTED_AGY_MODELS in
+test_server.py exists to catch, and it caught this one from both sides — a
+documented slug agy had dropped, and a live family the docs never mentioned.
+
+The old human labels ("Gemini 3.1 Pro (High)", "Claude Sonnet 4.6 (Thinking)") are
+GONE from the list, so
 validate_model rejects them — verified live on 1.1.5: the old label raised
 "unknown agy model ... expected one of: <slugs>" without spending a call, while
-`--model gemini-3.5-flash-high` round-tripped clean. Nothing in the bridge's
+the slug form round-tripped clean. Note that agy's settings.json `"model"` field
+is NOT that same surface: on this 1.1.25 install it holds the human label
+`Gemini 3.8 Flash (High)` and agy honors it (that is the default the no-`model`
+call above resolved through). Only `--model` requires a slug, so don't read a
+label in that file as a stale config. Nothing in the bridge's
 machinery had to change (validation was always format-agnostic, which is exactly
 why the whole suite stayed green through this break) — but every docstring and
 README example that named an old label was actively steering callers into a
@@ -115,8 +141,13 @@ NOT affect the bridge. `-p` is spawned with DEVNULL stdin, and the request-revie
 approval gate only engages on an INTERACTIVE stdin: given EOF-on-stdin, print mode
 still auto-executes every tool call with no prompt (re-verified on 1.1.0 — a
 file-writing task completed and wrote its file in ~36 s, exit 0, identically with
-and without `--mode accept-edits`). So the bridge keeps NOT passing `--mode`; the
+and without `--mode accept-edits`). So the bridge kept NOT passing `--mode`; the
 `request-review` toolPermission agy has logged since 1.0.5 stays a no-op for -p.
+SUPERSEDED IN PART by 1.1.12, which fixed `--mode` being ignored in headless -p
+entirely — which is why that 1.1.0 test could not have shown anything else. The
+bridge now passes `--mode plan` when a caller opts in, and only then; see the
+plan-mode paragraph at the end of the SECURITY note. `accept-edits` stays
+unpassed, since --dangerously-skip-permissions already auto-approves everything.
 Full compat re-verified on 1.1.0 via the bridge itself: ask + conversation-pinned
 continue round-trips return clean over stdout, and base dir /
 last_conversations.json / JSONL-primary transcript are all intact (SQLite
@@ -384,10 +415,31 @@ gets blocked and stalls print mode (it returned "Error: timeout waiting for
 response", exit 1, having executed nothing), while write_to_file still runs under
 --sandbox and still lands OUTSIDE the declared workspace (exit 0). The new 1.1.0
 `--mode accept-edits` and `--sandbox` coexist without error, but neither makes -p
-safe. For both reasons the bridge deliberately does NOT pass --sandbox. There is
-still no agy flag that makes print mode both safe and useful: 1.1.3's headless
-permission gate is the closest thing, and it lands on the useless side of that
-line (see the headless-permissions note above).
+safe. For both reasons the bridge deliberately does NOT pass --sandbox. Of agy's own
+knobs, 1.1.3's headless permission gate is the closest thing to safe-and-useful,
+and it lands on the useless side of that line (see the headless-permissions note
+above).
+
+--mode plan (agy 1.1.12+) IS the exception, and it is opt-in per call rather than
+part of the posture above. Verified on 1.1.20 through this bridge, with a control
+that makes the claim falsifiable: the same prompt -- run `cmd /c echo SHELLRAN >
+<absolute path>` -- EXECUTED and created the file on a normal call, and created
+nothing at all under plan=True, which answered with a plan document written into
+agy's own brain dir instead. A file read still answered normally, so unlike
+--sandbox and unlike the 1.1.3 gate this restricts without disabling. It also
+survives --dangerously-skip-permissions, which the bridge keeps passing (dropping
+it would soft-deny the very reads plan mode exists to allow).
+
+Do not oversell it. Plan mode constrains agy's AGENT LOOP, so it is enforced the
+way Copilot's and Cursor's modes are and not the way codex's seatbelt/landlock
+sandbox is: it is a strong default for "look at this repo but don't touch it", not
+a boundary to put in front of a hostile prompt. For that, use codex_ask with
+sandbox="read-only". And it costs the slash shield: agy refuses the combination
+with --disable-slash-commands, printing "--mode plan has no effect while slash
+command expansion is disabled" and then running UNRESTRICTED -- the exact
+looks-restricted-but-isn't outcome plan mode exists to prevent -- so the bridge
+drops that flag and enforces the equivalent client-side in
+_guard_plan_mode_prompt.
 
 So `workspace` is only a starting context, NOT a security boundary:
 every call effectively runs arbitrary code with your privileges. Only invoke
@@ -397,12 +449,10 @@ whole bridge inside a container or VM.
 """
 
 import asyncio
-import hmac
 import json
 import logging
 import os
 import re
-import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -411,87 +461,245 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import uuid
-import webbrowser
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from fastmcp import Context, FastMCP
 
-import codex_bridge
-import copilot_bridge
-import cursor_bridge
-import grok_bridge
-import kimi_bridge
+import proc_tree
 
-# Server-level instructions. The MCP client sends these to its model on connect
-# (Claude Code surfaces them as an "MCP Server Instructions" block), so EVERY
-# user who installs the bridge gets their host model taught how and WHEN to reach
-# for these tools — without ever opening the README. Keep this a tight ROUTING
-# guide, not a manual: it costs context tokens in every session, and per-tool
-# detail already lives in each tool's own description/annotations. The highest-
-# value content here is what a model can't infer from tool schemas alone —
-# proactive triggers, which backend to pick, and the workspace footgun.
-SERVER_INSTRUCTIONS = """\
-This server bridges six external coding CLIs — Antigravity (Gemini), OpenAI \
-Codex, GitHub Copilot, Cursor, and the two EXPERIMENTAL ones, Grok Build (xAI) \
-and Kimi Code (Moonshot) — into your session as sub-agents that run on the \
-USER'S OWN quota. Delegating here spends that quota instead of your tokens, gets \
-a second model-family opinion, or generates images.
+# Server-level instructions: the routing guide. An MCP client may send these to its
+# model on connect, so a host model learns how and WHEN to reach for these tools
+# without anyone opening the README. Not every host does (measured 2026-11, 0.36):
+#   - Claude Code 2.1.319 cuts instructions AND each tool description at 4,096 chars
+#     (older versions at 2,048);
+#   - Copilot forwards them only with --allow-all-mcp-server-instructions;
+#   - the agy CLI forwards neither instructions nor descriptions up front.
+# So the text is ORDERED for truncation: the offer trigger, a one-line picker and
+# the workspace rule come first and stand on their own within ~1,900 chars; per-
+# backend detail, mechanics, the status/version relay and watch follow, and
+# Security is last. The largest variant (every backend on) stays <= 3,800 chars,
+# which a test pins. What a host never shows is covered twice more: every tool
+# description repeats the workspace rule and its own routing sentence, and
+# `agent-intern rules` prints this exact text for a host's own rules file.
+#
+# The text is assembled from the backends AGENT_INTERN_BACKENDS turns on (see
+# _parse_backends), so it never routes the model to a tool the server dropped.
 
-Reach for these tools when:
-- the user wants an IMAGE — antigravity_image is your only image generator \
-(antigravity_image_swarm for several at once).
-- a job splits into many independent sub-tasks — agent_swarm runs them in \
-parallel, mixing any backends in one call.
-- you want a heavier or different-family model's take, or want to offload grunt \
-work off your own token budget.
-Don't delegate what you can just answer: each call takes ~10-30s and spends the \
-user's quota.
+# Every backend, in the order the instructions list them.
+BACKENDS = (
+    "antigravity",
+    "codex",
+    "copilot",
+    "cursor",
+    "claude",
+    "grok",
+    "opencode",
+    "kimi",
+    "muse",
+)
 
-Pick a backend:
-- antigravity_* (Gemini) — fast, cheap tool-calling; the ONLY image model. No \
-real sandbox, so trusted prompts only.
-- codex_* (OpenAI) — strongest reasoning and real repo edits behind a REAL \
-enforced sandbox (read-only by default; pass sandbox="workspace-write" to let \
-it edit files).
-- copilot_* (GitHub) — agentic coding on a Copilot plan; sandbox is best-effort, \
-not an OS boundary.
-- cursor_* (Cursor) — agentic coding on a Cursor plan, with a wide model menu \
-(GPT/Claude/Grok/Composer via `model`); sandbox is agent-enforced (read-only = \
-ask mode), not an OS boundary.
-- grok_* (Grok Build, xAI — EXPERIMENTAL, never live-verified) — needs SuperGrok \
-/ X Premium+ or XAI_API_KEY. Real OS sandbox, but on LINUX/macOS ONLY: on Windows \
-it silently does not enforce, so read-only there rests on a tool allowlist.
-- kimi_* (Kimi Code, Moonshot — EXPERIMENTAL, never live-verified) — Kimi K2 \
-family; like antigravity it has NO sandbox and auto-executes tools, so trusted \
-prompts only. Needs `kimi login` or an API key.
-Both experimental backends are unproven end-to-end: run their *_status first, and \
-tell the user plainly if one fails rather than retrying blindly.
+# The backends agent_swarm can dispatch to: all but Kimi.
+_SWARM_BACKENDS = frozenset(BACKENDS) - {"kimi"}
 
+_EXPERIMENTAL_BACKENDS = frozenset({"grok", "kimi", "muse"})
+
+# How the opening sentence names each backend.
+_BACKEND_TITLES = {
+    "antigravity": "Antigravity (Gemini)",
+    "codex": "OpenAI Codex",
+    "copilot": "GitHub Copilot",
+    "cursor": "Cursor",
+    "claude": "Claude Code",
+    "grok": "Grok Build (xAI, EXPERIMENTAL)",
+    "opencode": "opencode (any model, incl. FREE ones)",
+    "kimi": "Kimi Code (Moonshot, EXPERIMENTAL)",
+    "muse": "Muse Code (Meta, EXPERIMENTAL)",
+}
+
+# Each backend's clause in the one-line picker near the top.
+_BACKEND_PICKS = {
+    "antigravity": "antigravity_* for fast, cheap calls and images",
+    "codex": "codex_* for the hardest reasoning and a real OS sandbox",
+    "copilot": "copilot_* on a Copilot plan",
+    "cursor": "cursor_* on a Cursor plan (GPT/Claude/Grok models)",
+    "claude": "claude_* for large refactors and careful reviews",
+    "grok": "grok_* on a SuperGrok plan",
+    "opencode": "opencode_* when the user has no subscription (free models)",
+    "kimi": "kimi_* on a Kimi plan",
+    "muse": "muse_* on a Muse plan",
+}
+
+# Each backend's detail line under "Backends".
+_BACKEND_GUIDES = {
+    "antigravity": """\
+- antigravity_* (Gemini) — the only image model; no real sandbox.""",
+    "codex": """\
+- codex_* (OpenAI) — a REAL OS sandbox: read-only by default, \
+sandbox="workspace-write" to let it edit.""",
+    "copilot": """\
+- copilot_* (GitHub) — best-effort sandbox, not an OS boundary.""",
+    "cursor": """\
+- cursor_* (Cursor) — wide model menu via `model`; agent-enforced sandbox \
+(read-only = ask mode).""",
+    "claude": """\
+- claude_* (Claude Code) — agent-enforced sandbox; workspace-write edits files \
+but runs no shell.""",
+    "grok": """\
+- grok_* (Grok Build, EXPERIMENTAL, never live-verified) — needs SuperGrok or \
+XAI_API_KEY; its OS sandbox works on Linux/macOS only.""",
+    "opencode": """\
+- opencode_* (opencode) — free `opencode/*` models need no account and answer in \
+seconds; add a key for Claude/GPT-class models. Agent-enforced sandbox.""",
+    "kimi": """\
+- kimi_* (Kimi Code, EXPERIMENTAL, never live-verified) — NO sandbox; needs \
+`kimi login` or an API key.""",
+    "muse": """\
+- muse_* (Muse Code, EXPERIMENTAL, real model unverified) — needs a Muse plan or \
+META_API_KEY; read-only switches its write/shell/web tools off.""",
+}
+
+
+def _parse_backends(raw: Optional[str]) -> tuple[tuple[str, ...], list[str]]:
+    """The backends AGENT_INTERN_BACKENDS turns on, and the names in it that match none.
+
+    `raw` is a comma- or space-separated list of BACKENDS names, in any case.
+    Unset or blank turns every backend on. So does a list in which no name
+    matches, since a server with no backend has nothing to offer; the caller warns
+    about the unknown names either way.
+    """
+    if not raw or not raw.strip():
+        return BACKENDS, []
+    names = [n.lower() for n in re.split(r"[,\s]+", raw.strip()) if n]
+    unknown = [n for n in names if n not in BACKENDS]
+    enabled = tuple(b for b in BACKENDS if b in names)
+    return (enabled or BACKENDS), unknown
+
+
+def _server_instructions(enabled: tuple[str, ...]) -> str:
+    """The routing guide, covering only the `enabled` backends and their tools.
+
+    Ordered for hosts that truncate it: see the note above BACKENDS."""
+    titles = [_BACKEND_TITLES[b] for b in enabled]
+    named = titles[0] if len(titles) == 1 else ", ".join(titles[:-1]) + " and " + titles[-1]
+    gains = "spends that quota instead of your tokens"
+    if "antigravity" in enabled:
+        gains += ", gets a second model-family opinion, and can generate images"
+    else:
+        gains += " and gets a second model-family opinion"
+    intro = (
+        f"This server runs {named} as sub-agents on the USER'S OWN quota. Delegating here {gains}."
+    )
+
+    triggers = []
+    if "antigravity" in enabled:
+        triggers.append("- an IMAGE: antigravity_image (antigravity_image_swarm for several).")
+    if _SWARM_BACKENDS.intersection(enabled):
+        triggers.append(
+            "- many independent sub-tasks: agent_swarm runs them in parallel, mixing "
+            "backends.\n"
+            "- something to JUDGE, RESEARCH or ATTACK with several models: preset_swarm "
+            "(jury, research, red-team, council; swarm_presets lists them)."
+        )
+    triggers.append(
+        "- bulk, mechanical work (a rename across 30 files, boilerplate, a first-pass "
+        "port).\n"
+        "- a heavier or different-family second opinion on a risky diff or design call."
+    )
+
+    picks = "; ".join(_BACKEND_PICKS[b] for b in enabled)
+    guides = [_BACKEND_GUIDES[b] for b in enabled]
+    if _EXPERIMENTAL_BACKENDS.intersection(enabled):
+        guides.append(
+            "Run an EXPERIMENTAL backend's *_status first, and tell the user plainly "
+            "if it fails rather than retrying."
+        )
+
+    return f"""\
+{intro}
+
+{_INSTRUCTIONS_OFFER}
+{chr(10).join(triggers)}
+{_INSTRUCTIONS_DONT}
+
+Pick: {picks}.
+
+{_INSTRUCTIONS_WORKSPACE}
+
+Backends:
+{chr(10).join(guides)}
+
+{_INSTRUCTIONS_MECHANICS}"""
+
+
+_INSTRUCTIONS_OFFER = """\
+OFFER IT — don't wait to be asked. When a task fits one of these, say so in ONE \
+line before you start (backend and reason) and ask. Ask once per task; if the user \
+declines, drop it for that task. Delegate without asking only for images, or where \
+the user already said to:"""
+
+_INSTRUCTIONS_DONT = """\
+Don't offer for a couple of tool calls, for work that leans on context only this \
+conversation has, or when the ~10-30 s round trip costs more than doing it."""
+
+_INSTRUCTIONS_WORKSPACE = """\
+ALWAYS pass workspace=<the project dir>. It defaults to the server's cwd, so \
+without it the sub-agent sees no repo: the most common mistake."""
+
+_INSTRUCTIONS_MECHANICS = """\
 Mechanics:
-- Pass `workspace` = the relevant project directory. It defaults to the server's \
-cwd, so WITHOUT it the sub-agent answers with no repo context — this is the most \
-common mistake.
-- *_continue resumes the thread rooted at a workspace; swarm workers are \
-one-shot (no continue).
-- watch=true opens a live browser view of the agent working (identical return \
-value).
-- *_status checks a backend is installed and logged in, and spends no quota — \
-use it if a call reports "not found".
+- *_continue resumes the thread rooted at that workspace; swarm workers are \
+one-shot.
+- *_status spends no quota: run it when a call says "not found". Its `bridge \
+version` row says when a newer agent-intern release is out; if so, tell the user \
+in one line, with the upgrade command it names. Nobody else will.
+- watch=true opens a live browser view of the agent (same return value).
 
-Security: they all run as autonomous agents. Codex's sandbox is the only hard \
-boundary everywhere; grok's is a real one too, but only on Linux/macOS. Use only \
-with trusted prompts on trusted content."""
+Security: every backend is an autonomous agent, and only a real OS sandbox is a \
+hard boundary. Use trusted prompts on trusted content only."""
 
-mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS)
+
+def _claude_hidden_in_claude_code(
+    enabled: tuple[str, ...], raw: Optional[str], env=None
+) -> tuple[tuple[str, ...], bool]:
+    """(`enabled` minus claude, True) when this server's host is Claude Code.
+
+    Claude Code sets CLAUDECODE=1 for the processes it starts, this server included,
+    and a claude backend there is the host delegating to itself: the same quota,
+    spent twice. So it is left out unless AGENT_INTERN_BACKENDS names claude
+    explicitly, which always wins. `raw` is AGENT_INTERN_BACKENDS as read."""
+    env = os.environ if env is None else env
+    if env.get("CLAUDECODE") != "1" or "claude" not in enabled:
+        return enabled, False
+    named = {n.lower() for n in re.split(r"[,\s]+", (raw or "").strip()) if n}
+    if "claude" in named:
+        return enabled, False
+    rest = tuple(b for b in enabled if b != "claude")
+    return (rest or enabled), bool(rest)
+
+
+CLAUDE_HIDDEN_NOTE = (
+    "claude is off because the host is Claude Code (CLAUDECODE=1); to turn it on "
+    "anyway, name claude in AGENT_INTERN_BACKENDS"
+)
+
+# Read once at import, like AGY_BIN below; the launching process's environment wins.
+ENABLED_BACKENDS, _UNKNOWN_BACKENDS = _parse_backends(os.environ.get("AGENT_INTERN_BACKENDS"))
+ENABLED_BACKENDS, CLAUDE_HIDDEN = _claude_hidden_in_claude_code(
+    ENABLED_BACKENDS, os.environ.get("AGENT_INTERN_BACKENDS")
+)
+
+SERVER_INSTRUCTIONS = _server_instructions(ENABLED_BACKENDS)
 
 # The running bridge's version — the source of truth is THIS file (not the
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.26.0"
+__version__ = "0.36.0"
+
+# Passed explicitly: without it the MCP handshake's serverInfo.version reports
+# fastmcp's own version, not the bridge's.
+mcp = FastMCP("agent-intern", instructions=SERVER_INSTRUCTIONS, version=__version__)
 
 # Logs go to stderr (stdout is the MCP protocol channel). Quiet by default;
 # set AGY_BRIDGE_DEBUG=1 for per-call diagnostics. See _configure_logging.
@@ -523,7 +731,96 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
-VERIFIED_AGY_VERSION = (1, 1, 12)
+#
+# 1.5.3 re-verification (live, Windows, 2026-11-09, feat/0.36): ask, continue, an
+# image, a two-worker swarm and a cut-short turn (the 1.5.0 exit-3 timeout) held;
+# nothing in 1.5.2/1.5.3 touches the bridge's path. The model list, the default
+# model and base names were NOT re-checked on 1.5.3 (see the 1.5.1 note).
+#
+# 1.5.1 re-verification (live, Windows, 2026-11-05, this branch): two releases and
+# one REAL change. Ask, continue in the same conversation, an image, a two-worker
+# swarm, `agy models` (the same 13 suffixed slugs), `/usage` and `/model` held, and
+# an antigravity_ask through this server hosted by agy itself answered. 1.5.0 made
+# an expired --print-timeout EXIT 3 (status ERROR, finished_reason print_timeout,
+# an AGY_ERROR DEADLINE_EXCEEDED line plus the old stderr mark), where 1.2.0-1.4.x
+# exited 0; every runner here raised "agy exited 3" before its timeout check ran.
+# The check now comes first (see _run_agy), verified live with a 6 s timeout. agy
+# also accepts an effort-less base name (`--model gemini-4-argon`), which
+# validate_model now does too. Not re-checked: watch mode, image swarm, plan mode,
+# schema.
+#
+# 1.4.12 re-verification (live, Windows): fourteen releases and a minor bump, no
+# break. Ask on the default model, continue in the same conversation, an image, a
+# two-worker swarm, `--model gemini-4-argon-high`, `/usage` and `/changelog` (both
+# still answered by the CLI, no conversation left behind) all held. 1.4.7 stopped
+# headless runs from "rendering the transcript for display", but the JSONL
+# transcript is still written: the swarm workers, which read nothing else, answered.
+# 1.4.11 added `finished_reason` to the json and stream-json results (see
+# _FINISHED_EARLY_REASONS); an expired --print-timeout reports "print_timeout" and
+# still exits 0 with status SUCCESS and the same stderr line, so the old check held
+# and the field is a second signal. Only print_timeout was seen live; "error" and
+# "interrupted" are handled as the changelog describes them. The drift is the model
+# catalog once more: a gemini-4-argon family (low, medium, high), in no changelog
+# entry until 1.4.3 fixed it for GEMINI_API_KEY users, and agy's own default moved
+# onto it: in a clean HOME with no settings.json, 1.4.12 picked Gemini 4 Argon
+# (Medium). `/usage` gained a matching "Gemini 4 Argon" family whose limit is named
+# "Gemini 4 Argon Weekly Limit" (no "Remaining"), which the parser already handled.
+#
+# 1.3.5 re-verification (live, Windows): thirteen releases and a minor bump, no
+# break. Ask on the default model, continue pinning the same conversation, a
+# one-worker swarm, and `/usage` all held. 1.3.2 stopped
+# --dangerously-skip-permissions from approving the plan in /plan mode, which
+# looked like it could leave `--mode plan` waiting for a review that never comes;
+# it doesn't: plan=True answered in 58 s, wrote its plan to the brain dir and left
+# the worktree untouched. 1.2.14 made `--json-schema` refuse a root other than
+# "type": "object", with exit 1 and a one-line stderr before any model call, so
+# _normalize_json_schema still only demands an object and lets agy name the rule.
+# The only drift is the model catalog again (see the model-slug note above).
+# `--model claude-sonnet-5-5-high` passed validate_model and reached agy, which
+# answered with the account's exhausted Claude quota, so that family's answer path
+# is unverified; the slug itself is not.
+#
+# 1.2.10 re-verification (live, Windows): eleven releases and a minor bump, and one
+# REAL break. 1.2.0 made an expired --print-timeout return its partial output with
+# exit 0 and status SUCCESS, so every runner here was handing back truncated
+# answers as whole ones — reproduced through _run_agy before the fix (5629 chars
+# ending "when an artisan", returned as the answer). _print_timeout_error restores
+# the old contract; verified after the fix on _run_agy, _run_agy_watched and an
+# isolated swarm worker. Everything else held: ask on the default model and on
+# `--model gemini-3.8-flash-low`, continue pinning the same conversation, the json
+# result object, the JSONL transcript read, `agy models` <slug>\t<label> with an
+# unchanged catalog, and the `/usage` table. 1.2.6's AGY_ERROR stderr line and
+# 1.2.10's exit 3 for a turn that dies on a model error need nothing: both are
+# non-zero exits, which already raise with the stderr tail attached.
+#
+# 1.1.25 re-verification (live, Windows): ask round-tripped through _run_agy with
+# the real argv on both the default-model path and `--model gemini-3.8-flash-high`,
+# the `--output-format json` object still carries conversation_id/status/response,
+# `agy models` still emits <slug>\t<label>, the `/usage` quota table still parses
+# (antigravity_status reported both families at 100% without spending a call), and
+# the JSONL transcript read path still resolves. The ONLY drift in 1.1.21-1.1.25 is
+# the model catalog -- 3.8 in, 3.5 out -- which is data, not plumbing, and is
+# handled where it belongs (see the model-slug note above and
+# DOCUMENTED_AGY_MODELS).
+#
+# Two upstream fixes in this range landed directly on shapes this bridge relies on,
+# and both moved TOWARD it. 1.1.23 fixed subcommands such as `models` hanging on an
+# inherited, unclosed stdin -- exactly the hang list_agy_models has always spawned
+# with stdin=DEVNULL to dodge, so that workaround is now belt-and-braces rather
+# than load-bearing (it stays: the bridge still supports older agy). And 1.1.24
+# fixed headless runs with piped stdout/stderr hanging on EXIT, by setting
+# FD_CLOEXEC so a grandchild process can no longer hold the caller's pipes open;
+# every call here is `capture_output=True`, so that was a live timeout risk on the
+# bridge's own argv shape, absorbed until now only by the subprocess timeout.
+#
+# Watch out for one false alarm this range introduces: agy left an EMPTY brain dir
+# behind (no transcript, just empty .user_uploaded/ and scratch/) at the moment it
+# self-updated, and antigravity_status dutifully reported "newest transcript [!!]"
+# for it. The read path was fine -- the very next bridge call wrote a real
+# transcript and status went green -- so an empty newest-conversation is a stale
+# artifact, not a regression. (Issue #8: the row now skips such conversations, and
+# ones still running or whose turn failed; see _transcript_status_row.)
+VERIFIED_AGY_VERSION = (1, 5, 3)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
@@ -542,6 +839,17 @@ SLASH_COMMANDS_MIN_VERSION = (1, 1, 9)
 # /hooks, /help, /config, /changelog). This is what makes the quota rows in
 # antigravity_status free. See supports_print_usage.
 USAGE_PRINT_MIN_VERSION = (1, 1, 11)
+
+# First agy version that HONORS `--mode` in headless print mode (1.1.12). The flag
+# parses on older builds and does nothing there -- 1.1.12's changelog says it
+# plainly: "--mode being ignored in headless -p runs, where a valid value such as
+# accept-edits or plan was never applied and an unrecognized value produced no
+# warning at all." That is why plan mode is GATED rather than best-effort. Every
+# other gate here degrades to a lesser-but-safe path when it answers False; this
+# one cannot, because plan mode is a RESTRICTION. Silently dropping it would hand
+# back a fully-empowered run to a caller who asked for a look-but-don't-touch one,
+# reporting success either way. See supports_plan_mode.
+PLAN_MODE_MIN_VERSION = (1, 1, 12)
 
 # Poll window for the transcript/conversation-id to appear after agy exits.
 # agy has already returned 0 by the time we read, so the common case resolves
@@ -631,6 +939,14 @@ def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
     """Return a warning if `latest` is a newer bridge version than this file.
 
     None if no newer release is known, or if either version can't be parsed.
+
+    Names the uvx upgrade FIRST and the source one second, because that is the
+    order the install paths actually rank: the README recommends `uvx
+    agent-intern` from PyPI, and this message used to say only "git pull in the
+    repo" -- advice with no repo to run it in for the recommended install, and
+    advice that disagreed with the upgrade line _bridge_version_status prints in
+    chat. Two update notices in one codebase should not hand out different
+    commands, and the wrong one should not be the one aimed at most users.
     """
     current = _parse_agy_version(__version__)
     if latest is None or current is None or latest <= current:
@@ -638,8 +954,9 @@ def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
     newest = ".".join(map(str, latest))
     return (
         f"A newer Agent Intern bridge is available: v{newest} "
-        f"(you are running v{__version__}). Update with `git pull` in the repo, "
-        "then restart Claude Code. Set AGY_BRIDGE_NO_UPDATE_CHECK=1 to silence this."
+        f"(you are running v{__version__}). Upgrade with `uvx agent-intern@latest`, "
+        "or `git pull` if you installed from source, then restart Claude Code. "
+        "Set AGY_BRIDGE_NO_UPDATE_CHECK=1 to silence this."
     )
 
 
@@ -748,10 +1065,10 @@ def _pump_pipe(stream, on_line) -> "tuple[threading.Thread, list]":
 def _get_agy_version() -> Optional[str]:
     """Return `agy --version` output, or None if agy can't be run."""
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [AGY_BIN, "--version"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=15,
             **_spawn_kwargs(),
@@ -768,6 +1085,8 @@ def _startup_checks() -> None:
     locally; the update check polls GitHub (skipped via AGY_BRIDGE_NO_UPDATE_CHECK,
     silent on any network failure).
     """
+    if _UNKNOWN_BACKENDS:
+        log.warning(_backends_status()[2])
     agy_warning = _compat_warning(_parse_agy_version(_get_agy_version() or ""))
     if agy_warning:
         log.warning(agy_warning)
@@ -1235,6 +1554,129 @@ def _bridge_version_status() -> tuple[str, bool, str]:
     return (label, True, f"v{__version__} (latest)")
 
 
+def _backends_status() -> tuple[str, bool, str]:
+    """Status row for AGENT_INTERN_BACKENDS: which backends are on, and any name in
+    it that matched none, which is the one thing that makes the row a problem."""
+    off = [b for b in BACKENDS if b not in ENABLED_BACKENDS]
+    detail = f"on: {', '.join(ENABLED_BACKENDS)}"
+    if off:
+        detail += f"; off: {', '.join(off)}"
+    if os.environ.get("AGENT_INTERN_BACKENDS", "").strip():
+        detail += " (AGENT_INTERN_BACKENDS)"
+    if CLAUDE_HIDDEN:
+        detail += f"; {CLAUDE_HIDDEN_NOTE}"
+    if _UNKNOWN_BACKENDS:
+        detail += (
+            f"; ignored unknown name(s) {', '.join(map(repr, _UNKNOWN_BACKENDS))}"
+            f" — valid: {', '.join(BACKENDS)}"
+        )
+    return ("backends", not _UNKNOWN_BACKENDS, detail)
+
+
+def _bridge_status_rows() -> list[tuple[str, bool, str]]:
+    """The rows every *_status opens with: the bridge's version, then, when
+    AGENT_INTERN_BACKENDS turns a backend off or names an unknown one, the
+    backends row."""
+    rows = [_bridge_version_status()]
+    if ENABLED_BACKENDS != BACKENDS or _UNKNOWN_BACKENDS:
+        rows.append(_backends_status())
+    depth = proc_tree.current_depth()
+    if depth >= proc_tree.MAX_DEPTH:
+        rows.append(
+            (
+                "nesting",
+                False,
+                f"delegation from here is refused: this server is {depth} agents deep "
+                f"({proc_tree.DEPTH_ENV}={depth}, limit {proc_tree.MAX_DEPTH}); the checks "
+                "below still run",
+            )
+        )
+    return rows
+
+
+# How many of the newest conversations _transcript_status_row tries before it calls
+# the read path broken.
+_TRANSCRIPT_PROBE_LIMIT = 10
+# A conversation touched this recently may still be running (another bridge call, a
+# swarm worker, agy's own UI), so failing to read it is no evidence of anything.
+_TRANSCRIPT_IN_PROGRESS_S = 300.0
+
+
+def _conversations_newest_first(limit: int) -> list[tuple[str, float]]:
+    """(conversation id, brain-dir mtime) for the `limit` newest conversations."""
+    if not BRAIN_DIR.is_dir():
+        return []
+    convs: list[tuple[str, float]] = []
+    for child in BRAIN_DIR.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            convs.append((child.name, child.stat().st_mtime))
+        except OSError:
+            continue
+    convs.sort(key=lambda c: c[1], reverse=True)
+    return convs[:limit]
+
+
+def _conversation_is_empty(conv_id: str) -> bool:
+    """No transcript entries and no SQLite store: nothing was ever written to read.
+
+    agy leaves such a brain dir behind when it self-updates (just empty
+    .user_uploaded/ and scratch/ folders, seen on 1.1.24)."""
+    return not _transcript_entries(conv_id) and not (CONVERSATIONS_DIR / f"{conv_id}.db").exists()
+
+
+def _transcript_status_row() -> tuple[str, bool, str]:
+    """Status row for the read path: can the bridge still read agy's answers?
+
+    Issue #8: this used to read only the single newest conversation, and that one
+    is often not finished. agy may have left it empty while self-updating, another
+    bridge call or a swarm worker may be running it right now, or its turn may have
+    failed (a quota error, a soft-denied tool) without writing an answer. Each of
+    those flipped Overall to PROBLEMS FOUND while every call worked, and a calling
+    agent then read that as "agy is broken".
+
+    What the row is for is a change in agy's transcript format, and that breaks
+    every conversation, not one. So: walk the newest _TRANSCRIPT_PROBE_LIMIT and
+    report ok at the first readable answer. Fail only when none is readable and at
+    least one of them is neither empty nor recent enough to still be running.
+    """
+    label = "newest transcript"
+    convs = _conversations_newest_first(_TRANSCRIPT_PROBE_LIMIT)
+    if not convs:
+        return (label, True, "no conversations yet")
+    now = time.time()
+    skipped = 0
+    suspect: Optional[str] = None
+    for conv_id, mtime in convs:
+        try:
+            _read_response(conv_id)
+        except RuntimeError as e:
+            skipped += 1
+            if (
+                suspect is None
+                and now - mtime > _TRANSCRIPT_IN_PROGRESS_S
+                and not _conversation_is_empty(conv_id)
+            ):
+                suspect = str(e)
+            continue
+        if skipped:
+            return (
+                label,
+                True,
+                f"readable (skipped {skipped} newer without a finished answer: "
+                "empty, still running or failed)",
+            )
+        return (label, True, "readable")
+    if suspect is None:
+        return (
+            label,
+            True,
+            f"nothing finished to read yet (the {len(convs)} newest are empty or still running)",
+        )
+    return (label, False, f"none of the {len(convs)} newest is readable: {suspect}"[:160])
+
+
 def _collect_status() -> list[tuple[str, bool, str]]:
     """Gather setup diagnostics as (label, ok, detail) rows.
 
@@ -1244,7 +1686,13 @@ def _collect_status() -> list[tuple[str, bool, str]]:
     AGY_BRIDGE_NO_UPDATE_CHECK is set) makes one best-effort GitHub call to report
     whether a newer bridge release exists.
     """
-    rows: list[tuple[str, bool, str]] = [_bridge_version_status()]
+    return _bridge_status_rows() + _agy_status_rows()
+
+
+def _agy_status_rows() -> list[tuple[str, bool, str]]:
+    """agy's own rows of _collect_status, without the bridge rows every backend
+    shares (`agent-intern doctor` prints those once, not per backend)."""
+    rows: list[tuple[str, bool, str]] = []
 
     version = _parse_agy_version(_get_agy_version() or "")
     if version is None:
@@ -1266,15 +1714,7 @@ def _collect_status() -> list[tuple[str, bool, str]]:
 
     rows.append(("last_conversations.json", LAST_CONVERSATIONS.exists(), str(LAST_CONVERSATIONS)))
 
-    newest = _find_newest_conv_after(0.0)
-    if newest is None:
-        rows.append(("newest transcript", True, "no conversations yet"))
-    else:
-        try:
-            _read_response(newest)
-            rows.append(("newest transcript", True, "readable"))
-        except RuntimeError as e:
-            rows.append(("newest transcript", False, str(e)[:80]))
+    rows.append(_transcript_status_row())
 
     if CONVERSATIONS_DIR.exists():
         n = sum(1 for _ in CONVERSATIONS_DIR.glob("*.db"))
@@ -1332,6 +1772,192 @@ def supports_disable_slash_commands() -> bool:
         return _AGY_SLASH_GATE
 
 
+# Whether the installed agy HONORS `--mode` in print mode. Cached for the process,
+# like the gates above.
+_AGY_PLAN_GATE: Optional[bool] = None
+_AGY_PLAN_GATE_LOCK = threading.Lock()
+
+
+def supports_plan_mode() -> bool:
+    """True if this agy honors `--mode plan` in print mode (1.1.12+).
+
+    An unparseable/missing version answers False, and callers must then REFUSE the
+    request rather than run it unrestricted -- see PLAN_MODE_MIN_VERSION and
+    _check_plan_mode. Cached for the process.
+    """
+    global _AGY_PLAN_GATE
+    with _AGY_PLAN_GATE_LOCK:
+        if _AGY_PLAN_GATE is None:
+            version = _parse_agy_version(_get_agy_version() or "")
+            _AGY_PLAN_GATE = version is not None and version >= PLAN_MODE_MIN_VERSION
+        return _AGY_PLAN_GATE
+
+
+def _guard_plan_mode_prompt(prompt: str) -> None:
+    """Raise if agy's slash expansion would eat `prompt` on a plan-mode run.
+
+    Plan mode and `--disable-slash-commands` are MUTUALLY EXCLUSIVE: agy prints
+    "warning: --mode plan has no effect while slash command expansion is disabled"
+    and runs with plan mode OFF (verified on 1.1.20 -- the run came back
+    unrestricted). So a plan-mode call cannot carry the bridge's usual slash
+    shield, and the shield has to move here, client-side.
+
+    The rule mirrors agy's own trigger: expansion fires when the prompt's FIRST
+    token names a registered command, and a command is a single segment
+    ("/schedule"), where a POSIX path meant literally almost always carries a
+    second separator ("/etc/hosts …"). So a leading single-segment /token is
+    refused and everything else passes. Refusing is the right failure here: the
+    registered set includes side-effecting commands (`/goal` starts an autonomous
+    long-running task, `/schedule` creates cron jobs) and bridge prompts routinely
+    carry text the caller did not author. A false positive costs a rephrase; a
+    false negative runs someone else's command.
+
+    Skipped when AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 -- the same deliberate opt-in
+    _agy_base_args honors for callers who WANT `-p "/my-skill <args>"` to invoke a
+    skill.
+    """
+    if _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
+        return
+    stripped = prompt.strip()
+    first = stripped.split(maxsplit=1)[0] if stripped else ""
+    if first.startswith("/") and "/" not in first[1:] and "\\" not in first:
+        raise ValueError(
+            f"plan mode cannot run a prompt starting with {first!r}: agy expands a "
+            "leading slash command instead of sending it to the model, and plan mode "
+            "is incompatible with the --disable-slash-commands shield that normally "
+            "blocks that. Rephrase so the prompt does not begin with a command (or "
+            "set AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 to opt in deliberately)."
+        )
+
+
+def plan_from_sandbox(sandbox: Optional[str]) -> bool:
+    """Map agent_swarm's per-task `sandbox` onto agy's plan mode.
+
+    Every other backend in a swarm takes a `sandbox` policy, and Antigravity used
+    to be the one that silently IGNORED it — so a task written as
+    {"backend": "agy", "sandbox": "read-only"} ran completely unrestricted while
+    reading as though it were fenced. Plan mode is the first thing agy has that can
+    honour that request, so "read-only" now maps onto it.
+
+    The policies agy cannot honour are refused rather than approximated:
+
+    * "read-only"          -> plan mode. Agent-enforced, not an OS boundary; see
+                              _agy_base_args and the module SECURITY note.
+    * "danger-full-access" -> no restriction, which is what agy does anyway. Saying
+                              so explicitly is the point of the name.
+    * None (omitted)       -> no restriction. Antigravity's long-standing swarm
+                              default, deliberately left alone: flipping it would
+                              turn every existing file-writing swarm task into a
+                              plan document.
+    * "workspace-write"    -> ValueError. agy has NO write scoping to offer: under
+                              its own --sandbox the model still wrote a file
+                              OUTSIDE the declared workspace (re-verified on 1.1.0),
+                              so accepting this would promise a fence that does not
+                              exist. The other backends really do scope writes;
+                              quietly treating agy's as equivalent is exactly the
+                              confusion this function was added to end.
+    """
+    if sandbox is None or sandbox == "danger-full-access":
+        return False
+    if sandbox == "read-only":
+        return True
+    if sandbox == "workspace-write":
+        raise ValueError(
+            "antigravity cannot scope writes to a workspace, so sandbox="
+            "'workspace-write' would promise a fence agy does not have (under its own "
+            "--sandbox it still wrote outside the workspace). Use 'read-only' for plan "
+            "mode — agy investigates and writes a plan instead of touching anything — "
+            "or 'danger-full-access' to state plainly that this worker is unrestricted."
+        )
+    raise ValueError(
+        f"unknown sandbox {sandbox!r} for antigravity; expected 'read-only' or "
+        "'danger-full-access' (or omit it)"
+    )
+
+
+def _check_plan_mode(prompt: str) -> None:
+    """Validate a plan-mode request before any quota is spent."""
+    if not supports_plan_mode():
+        found = _get_agy_version() or "unknown"
+        raise ValueError(
+            f"plan=True needs agy {'.'.join(map(str, PLAN_MODE_MIN_VERSION))}+ "
+            f"(found {found}). Older agy accepts --mode and then ignores it in print "
+            "mode, so the run would come back fully empowered while reporting "
+            "success -- the one failure a restriction must not have. Upgrade agy, or "
+            "call without plan."
+        )
+    _guard_plan_mode_prompt(prompt)
+
+
+def _normalize_json_schema(schema: Union[dict, str]) -> str:
+    """agy's `--json-schema` argument as text, or raise on something unusable.
+
+    Accepts the object form (what an MCP client naturally sends) and pre-encoded
+    JSON text, because a model composing a tool call produces either. agy also
+    accepts a PATH to a schema file; the bridge deliberately does not, so a string
+    that is not JSON is a typo to report rather than a filename to go hunting for
+    — silently treating a malformed schema as a path is how you get an
+    unschema'd run that still reports success.
+    """
+    if isinstance(schema, str):
+        text = schema.strip()
+        try:
+            parsed = json.loads(text)
+        except ValueError as exc:
+            raise ValueError(
+                f"schema must be a JSON object or its JSON text ({exc}). A file path "
+                "is not accepted here — pass the schema itself."
+            ) from exc
+    else:
+        parsed = schema
+        text = json.dumps(schema)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"schema must be a JSON object, not {type(parsed).__name__}")
+    return text
+
+
+def _check_schema_support() -> None:
+    """Refuse a schema request on an agy that has no `--json-schema`.
+
+    1.1.8 added the flag alongside `--output-format json`, so supports_json_output()
+    is exactly the right gate — below it the bridge is on the plain-text stdout
+    path, where there is no result object to carry structured_output. Refusing
+    beats degrading for the same reason plan mode refuses: the caller is going to
+    parse what comes back, and prose that isn't the requested shape fails at their
+    end instead of ours.
+    """
+    if not supports_json_output():
+        found = _get_agy_version() or "unknown"
+        raise ValueError(
+            f"schema needs agy {'.'.join(map(str, JSON_OUTPUT_MIN_VERSION))}+ "
+            f"(found {found}), which is where --json-schema and the structured result "
+            "object arrived. Upgrade agy, or call without schema."
+        )
+
+
+def _structured_answer(result: dict, conv_id: str) -> str:
+    """The validated `structured_output` object of a schema run, as JSON text.
+
+    agy puts the schema-conforming object in its OWN field and leaves `response`
+    alone, and the two are not interchangeable: verified on 1.1.20 that `response`
+    on a schema run carries the model's raw emission — the same keys plus agy's own
+    `toolAction`/`toolSummary`, and in one run a line of prose ahead of the JSON —
+    while `structured_output` was exactly the declared fields. So a missing
+    structured_output RAISES rather than falling back to `response`; a caller that
+    asked for a schema is about to json.loads this.
+    """
+    structured = result.get("structured_output")
+    if structured is None:
+        status = result.get("status")
+        raise RuntimeError(
+            "agy returned no structured_output for a --json-schema run"
+            + (f" (status={status})" if status else "")
+            + f" in conversation {conv_id or 'unknown'}. The schema may be invalid, or "
+            "this agy may not honour the flag."
+        )
+    return json.dumps(structured, ensure_ascii=False)
+
+
 # Whether this agy answers `-p "/usage"` itself instead of sending it to a model.
 # Cached for the process, like the gates above.
 _AGY_USAGE_GATE: Optional[bool] = None
@@ -1376,10 +2002,10 @@ def _read_agy_usage() -> Optional[str]:
     long-running ask.
     """
     try:
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             [AGY_BIN, "--print-timeout", "20s", "-p", "/usage"],
+            starts_agent=False,  # a probe, not an agent run
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=25,
             **_spawn_kwargs(),
@@ -1397,35 +2023,49 @@ def _percent_remaining(value: str) -> Optional[float]:
         return None
 
 
-def _parse_usage_rows(stdout: str) -> list[tuple[str, bool, str]]:
-    """agy's `/usage` table as status rows, one per model family.
+def _parse_usage_table(stdout: str) -> dict[str, list[tuple[str, str, str]]]:
+    """agy's `/usage` table grouped by model family: {family: [(limit, remaining, resets)]}.
 
     agy 1.1.11+ prints one tab-separated record per limit:
 
         Gemini Models\tWeekly Limit Remaining\t100%\t2026-08-11T18:50:23Z
 
-    i.e. family, limit name, remaining share, reset time. We group by family in
-    first-seen order and keep the remaining share, dropping the reset timestamps —
-    they are the least useful column in a one-line status row.
-
-    A family whose remaining share has hit 0% is reported NOT ok: every call
-    against it will fail until the window resets, which is exactly the kind of
-    thing this tool exists to surface before the user spends a call finding out.
-    Unrecognized lines are skipped rather than raising — agy's format may change
-    again, and a status probe must never be the thing that breaks.
+    i.e. family, limit name, remaining share, reset time. Families keep their
+    first-seen order. The limit name loses its " Limit Remaining" tail ("Weekly");
+    a family-specific limit keeps its own prefix ("Gemini 4 Argon Weekly", from
+    "Gemini 4 Argon Weekly Limit", as agy 1.4.12 prints it). Unrecognized lines are
+    skipped rather than raising — agy's format may change again, and a status probe
+    must never be the thing that breaks.
     """
-    families: dict[str, list[tuple[str, str]]] = {}
+    families: dict[str, list[tuple[str, str, str]]] = {}
     for line in stdout.splitlines():
         fields = [f.strip() for f in line.split("\t")]
         if len(fields) < 3 or not fields[0] or not fields[2]:
             continue
         limit = fields[1].removesuffix(" Remaining").removesuffix(" Limit")
-        families.setdefault(fields[0], []).append((limit or fields[1], fields[2]))
+        resets = fields[3] if len(fields) > 3 else ""
+        families.setdefault(fields[0], []).append((limit or fields[1], fields[2], resets))
+    return families
+
+
+def _family_exhausted(limits: list[tuple[str, str, str]]) -> bool:
+    """True if any of a family's limits has 0% left: every call against it fails."""
+    return any(_percent_remaining(value) == 0.0 for _, value, _ in limits)
+
+
+def _parse_usage_rows(stdout: str) -> list[tuple[str, bool, str]]:
+    """agy's `/usage` table as status rows, one per model family.
+
+    Keeps the remaining share and drops the reset timestamps — they are the least
+    useful column in a one-line status row. A family whose remaining share has hit
+    0% is reported NOT ok: every call against it will fail until the window resets,
+    which is exactly the kind of thing this tool exists to surface before the user
+    spends a call finding out.
+    """
     rows: list[tuple[str, bool, str]] = []
-    for family, limits in families.items():
-        detail = ", ".join(f"{name} {value}" for name, value in limits)
-        exhausted = any(_percent_remaining(v) == 0.0 for _, v in limits)
-        rows.append((f"quota: {family}", not exhausted, detail))
+    for family, limits in _parse_usage_table(stdout).items():
+        detail = ", ".join(f"{name} {value}" for name, value, _ in limits)
+        rows.append((f"quota: {family}", not _family_exhausted(limits), detail))
     return rows
 
 
@@ -1443,6 +2083,179 @@ def _quota_status_rows() -> list[tuple[str, bool, str]]:
     out = _read_agy_usage()
     rows = _parse_usage_rows(out) if out else []
     return rows or [("quota", True, 'unreadable (`agy -p "/usage"` failed)')]
+
+
+# --- quota failures (issue #7) ---------------------------------------------------
+# agy's quota is per model FAMILY ("Gemini Models", "Gemini 4 Argon", "Claude and
+# GPT models"), but a run that hits one fails with a bare non-zero exit, e.g.
+# "Individual quota reached, resets in ~75h". A calling agent reads that as "agy is
+# out of quota" and moves the job onto its own, scarcer tokens, when another family
+# would have answered for free. So a failed run whose output reads like a quota or
+# rate-limit error gets agy's own `/usage` table appended, with the family the call
+# drew on and a model to retry with.
+#
+# The markers are matched only against a FAILED run's stderr/stdout, never an
+# answer. A false positive costs one free `/usage` read and an extra paragraph.
+_QUOTA_FAILURE_MARKERS = (
+    "quota",
+    "rate limit",
+    "rate-limit",
+    "rate_limit",
+    "ratelimit",
+    "resource_exhausted",
+    "resource exhausted",
+    "too many requests",
+)
+
+# A swarm whose workers all hit the same exhausted family fails N times within a
+# second or two. One `/usage` read serves them all.
+_QUOTA_REPORT_TTL_S = 30.0
+_QUOTA_REPORT_CACHE: Optional[tuple[float, Optional[str]]] = None
+_QUOTA_REPORT_LOCK = threading.Lock()
+
+
+def _looks_like_quota_failure(text: Optional[str]) -> bool:
+    low = (text or "").lower()
+    return any(m in low for m in _QUOTA_FAILURE_MARKERS)
+
+
+def _recent_agy_usage() -> Optional[str]:
+    """`/usage` stdout for a failure report, shared for _QUOTA_REPORT_TTL_S.
+
+    None where agy has no free `/usage` (see supports_print_usage) or the read
+    failed. Unlike antigravity_status, which always reads fresh, a failure report
+    only needs the table to be seconds old.
+    """
+    global _QUOTA_REPORT_CACHE
+    if not supports_print_usage():
+        return None
+    with _QUOTA_REPORT_LOCK:
+        cached = _QUOTA_REPORT_CACHE
+        if cached is not None and time.monotonic() - cached[0] < _QUOTA_REPORT_TTL_S:
+            return cached[1]
+        out = _read_agy_usage()
+        _QUOTA_REPORT_CACHE = (time.monotonic(), out)
+        return out
+
+
+def _family_prefixes(family: str) -> list[str]:
+    """Model-slug prefixes a `/usage` family covers.
+
+    "Gemini 4 Argon" -> ["gemini-4-argon"], "Gemini Models" -> ["gemini"],
+    "Claude and GPT models" -> ["claude", "gpt"].
+    """
+    words = [w for w in family.lower().split() if w not in ("model", "models")]
+    return ["-".join(part.split()) for part in " ".join(words).split(" and ") if part.strip()]
+
+
+def _model_usage_family(model: Optional[str], families) -> Optional[str]:
+    """The `/usage` family a model draws on, or None if no family name matches.
+
+    Takes a slug (gemini-4-argon-high) or the human label agy's settings.json holds
+    (Gemini 4 Argon (High)). The longest matching family prefix wins, so a model
+    with its own family ("Gemini 4 Argon") is not counted under the generic
+    "Gemini Models".
+    """
+    if not model:
+        return None
+    slug = "-".join(re.sub(r"\s*\([^)]*\)\s*$", "", model).lower().split())
+    best: Optional[str] = None
+    best_len = 0
+    for family in families:
+        for prefix in _family_prefixes(family):
+            if (slug == prefix or slug.startswith(prefix + "-")) and len(prefix) > best_len:
+                best, best_len = family, len(prefix)
+    return best
+
+
+def _agy_settings_model() -> Optional[str]:
+    """The `"model"` label in agy's settings.json (what a call without `model` runs
+    on, swarm workers included: they copy this file), or None if unset/unreadable."""
+    try:
+        data = json.loads((AGY_DATA / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    model = data.get("model") if isinstance(data, dict) else None
+    return model if isinstance(model, str) and model.strip() else None
+
+
+def _quota_failure_note(model: Optional[str]) -> str:
+    """Which model families are out of quota and which still have some, for a
+    failed run that hit a quota or rate limit. Spends no quota (see _read_agy_usage).
+    """
+    table = _parse_usage_table(_recent_agy_usage() or "")
+    if not table:
+        return (
+            "agy reported a quota or rate limit, but its `/usage` table could not be "
+            "read to say which model family is out. Quota is counted per model family, "
+            "so another family may still answer: retry with a different `model` (agy's "
+            "`models` list has them), or run antigravity_status."
+        )
+    lines = ["agy reported a quota or rate limit. Quota left per model family (agy `/usage`):"]
+    for family, limits in table.items():
+        parts = []
+        for name, value, resets in limits:
+            empty = _percent_remaining(value) == 0.0
+            parts.append(f"{name} {value}" + (f" (resets {resets})" if empty and resets else ""))
+        mark = "  <- OUT OF QUOTA" if _family_exhausted(limits) else ""
+        lines.append(f"  {family}: {', '.join(parts)}{mark}")
+
+    exhausted = [f for f, limits in table.items() if _family_exhausted(limits)]
+    if not exhausted:
+        lines.append(
+            "No family is at 0%, so this is most likely a short-term rate limit: wait a "
+            "little and retry."
+        )
+        return "\n".join(lines)
+
+    if model:
+        ran_on = f"This call ran on {model}"
+        family = _model_usage_family(model, table)
+    else:
+        default = _agy_settings_model()
+        ran_on = "This call ran on agy's default model" + (f" ({default})" if default else "")
+        family = _model_usage_family(default, table)
+    if family in exhausted:
+        lines.append(f"{ran_on}, which draws on {family}, and that family is out of quota.")
+    elif family:
+        lines.append(
+            f"{ran_on}, which draws on {family}, and that family still shows quota, so "
+            "this may be a short-term rate limit: wait a little and retry."
+        )
+        return "\n".join(lines)
+    else:
+        lines.append(f"{ran_on}.")
+
+    models = list_agy_models()
+    options = []
+    for fam, limits in table.items():
+        if _family_exhausted(limits):
+            continue
+        # Match against every family, so gemini-4-argon-* counts as Gemini 4 Argon
+        # and is never offered as a "Gemini Models" example.
+        example = next((m for m in models if _model_usage_family(m, table) == fam), None)
+        options.append(f'{fam} (e.g. model="{example}")' if example else fam)
+    if options:
+        lines.append(
+            "agy itself is working: retry with a model from a family that still has "
+            f"quota: {'; '.join(options)}."
+        )
+    else:
+        lines.append("Every model family is out of quota until the reset times above.")
+    return "\n".join(lines)
+
+
+def _with_quota_note(message: str, output: Optional[str], model: Optional[str] = None) -> str:
+    """`message`, plus _quota_failure_note when `output` (a FAILED agy run's stderr
+    and stdout) reads like a quota or rate-limit error. The note is a courtesy: if
+    building it fails, the original message goes out unchanged."""
+    if not _looks_like_quota_failure(output):
+        return message
+    try:
+        return f"{message}\n\n{_quota_failure_note(model)}"
+    except Exception:  # noqa: BLE001 — never let the courtesy mask the real error
+        log.debug("quota note failed", exc_info=True)
+        return message
 
 
 def _parse_json_result(stdout: str) -> Optional[dict]:
@@ -1586,10 +2399,10 @@ def list_agy_models() -> list[str]:
             return _AGY_MODELS_CACHE
         names: list[str] = []
         try:
-            proc = subprocess.run(
+            proc = proc_tree.run_captured(
                 [AGY_BIN, "models"],
+                starts_agent=False,  # a probe, not an agent run
                 stdin=subprocess.DEVNULL,
-                capture_output=True,
                 **_TEXT,
                 timeout=20,
                 **_spawn_kwargs(),
@@ -1612,18 +2425,48 @@ def validate_model(model: Optional[str]) -> Optional[str]:
     — better than blocking a real model just because we couldn't enumerate them.
 
     Matching is EXACT against `agy models`, so agy 1.1.5's switch from human labels
-    ("Gemini 3.5 Flash (High)") to slugs (gemini-3.5-flash-high) is surfaced here as
-    a loud rejection listing the new names, not a silent run on the wrong model.
+    ("Gemini 3.1 Pro (High)") to slugs (gemini-3.1-pro-high) is surfaced here as a
+    loud rejection listing the new names, not a silent run on the wrong model. The
+    same exactness is what turns a model agy RETIRES into a loud failure rather
+    than a silent fallback — 1.1.25 dropped the whole gemini-3.5-flash family.
+
+    A BASE name, a listed slug minus its effort suffix (gemini-4-argon for
+    gemini-4-argon-high), is accepted too: `agy models` lists only suffixed slugs,
+    but agy runs the base name on the family's default effort. Verified live on
+    1.5.1 for the Gemini families only: `--model gemini-4-argon` and `--model
+    gemini-3.8-flash` both answered. Any other listed family's base name
+    (gpt-oss-120b, ...) is passed to agy the same way without having been tried.
+    Still exact per name, so a base name agy no longer lists any slug for fails.
     """
     if not model:
         return model
     known = list_agy_models()
-    if known and model not in known:
-        raise ValueError(f"unknown agy model {model!r}; expected one of: {', '.join(known)}")
+    bases = _agy_base_names(known)
+    if known and model not in known and model not in bases:
+        hint = f" (or a base name without the effort: {', '.join(bases)})" if bases else ""
+        raise ValueError(f"unknown agy model {model!r}; expected one of: {', '.join(known)}{hint}")
     return model
 
 
-def _agy_base_args(timeout_s: int) -> list[str]:
+# The effort suffixes agy puts on its model slugs (gemini-4-argon-high). Matched
+# whole, so a base name never swallows part of a version number.
+_AGY_EFFORT_SUFFIXES = ("minimal", "low", "medium", "high", "xhigh", "max")
+_AGY_EFFORT_RE = re.compile(r"^(.+)-(?:" + "|".join(_AGY_EFFORT_SUFFIXES) + r")$")
+
+
+def _agy_base_names(slugs: list[str]) -> list[str]:
+    """The effort-less base names of `slugs`, in first-seen order: gemini-4-argon
+    for gemini-4-argon-{low,medium,high}. A slug without an effort suffix
+    (gpt-oss-120b, if agy listed it bare) yields nothing: it is its own name."""
+    bases: list[str] = []
+    for slug in slugs:
+        m = _AGY_EFFORT_RE.match(slug)
+        if m and m.group(1) not in bases:
+            bases.append(m.group(1))
+    return bases
+
+
+def _agy_base_args(timeout_s: int, plan: bool = False) -> list[str]:
     """agy's argv prefix: binary, print deadline, and the headless permission opt-out.
 
     --dangerously-skip-permissions is REQUIRED as of agy 1.1.3, which stopped
@@ -1654,11 +2497,101 @@ def _agy_base_args(timeout_s: int) -> list[str]:
 
     Set AGY_BRIDGE_ALLOW_SLASH_COMMANDS=1 to keep agy's expansion — the deliberate
     opt-in for callers who WANT `-p "/my-skill <args>"` to invoke a skill.
+
+    `plan` adds agy 1.1.12's `--mode plan`, and it REPLACES the slash shield rather
+    than joining it: agy refuses the combination, printing "warning: --mode plan has
+    no effect while slash command expansion is disabled" and then running with plan
+    mode off. Passing both would therefore produce exactly the outcome plan mode
+    exists to prevent — an unrestricted run that looks restricted — so the flags are
+    exclusive here and _guard_plan_mode_prompt carries the shield client-side
+    instead. Gate on supports_plan_mode() and validate via _check_plan_mode BEFORE
+    calling; below 1.1.12 agy parses --mode and ignores it in print mode.
+
+    --dangerously-skip-permissions STAYS in plan mode, which sounds contradictory
+    and is not: verified on 1.1.20 that plan survives it. A file write and a shell
+    command were both refused and diverted into a plan artifact under agy's own
+    brain dir even when the prompt insisted ("do it now", "do not plan it"), while
+    a file READ answered normally. Dropping the skip flag would instead reintroduce
+    1.1.3's soft-deny and kill the reads plan mode exists to allow. Note what this
+    does and does not buy: it is agent-enforced, like Copilot's and Cursor's modes,
+    NOT an OS boundary — see the SECURITY note in the module docstring.
     """
     args = [AGY_BIN, "--print-timeout", f"{timeout_s}s", "--dangerously-skip-permissions"]
-    if supports_disable_slash_commands() and not _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
+    if plan:
+        args.extend(["--mode", "plan"])
+    elif supports_disable_slash_commands() and not _env_truthy("AGY_BRIDGE_ALLOW_SLASH_COMMANDS"):
         args.append("--disable-slash-commands")
     return args
+
+
+# What agy 1.2.0+ prints on stderr when --print-timeout expires with the turn still
+# running — "[agy] print timeout after 25s with turn in progress; returning partial
+# output" (verified on 1.2.10). It is the ONLY sign the turn was cut short.
+_PRINT_TIMEOUT_MARK = "print timeout after"
+
+
+def _print_timed_out(stderr: Optional[str]) -> bool:
+    """True if agy's stderr says --print-timeout expired before the turn finished."""
+    return _PRINT_TIMEOUT_MARK in (stderr or "")
+
+
+def _print_timeout_error(timeout_s: int, partial: str = "") -> RuntimeError:
+    """The error for a turn agy cut off at --print-timeout.
+
+    agy 1.2.0 changed what an expired --print-timeout does: instead of failing, it
+    hands back whatever partial output it has, exits 0, and reports status SUCCESS.
+    Verified on 1.2.10: a 25 s timeout on a long essay came back as 9177 characters
+    ending mid-sentence, exit 0, `"status":"SUCCESS"` — only stderr said otherwise.
+    Taken at face value that is a truncated answer passed off as a whole one, so the
+    bridge keeps its pre-1.2.0 contract instead: a timeout is an error. The partial
+    text rides along in the message rather than being thrown away, labelled as cut.
+
+    It does not point the caller at antigravity_continue. Resuming the conversation
+    works, but verified on 1.2.10 that the history agy keeps for the cut turn is not
+    the text it printed — asked for its last words, it quoted a sentence from well
+    before where stdout ended — so "pick up where it stopped" is not on offer.
+    """
+    msg = (
+        f"agy hit its {timeout_s}s timeout before finishing, so it returned only part "
+        "of an answer. Raise timeout_s, or split the task into smaller ones."
+    )
+    partial = (partial or "").strip()
+    if partial:
+        msg += f"\n\n--- partial answer, cut off mid-turn ({len(partial)} chars) ---\n{partial}"
+    return RuntimeError(msg)
+
+
+# agy 1.4.11 added `finished_reason` to the `--output-format json` result and the
+# stream-json result event. It is present only when the turn ended early, and the
+# changelog names three values: print_timeout, interrupted and error. Like the
+# 1.2.0 timeout, such a run can still exit 0 with status SUCCESS (verified on
+# 1.4.12 for print_timeout), so the field, not the status, says the answer is cut.
+_FINISHED_EARLY_REASONS = ("print_timeout", "interrupted", "error")
+
+
+def _finished_reason(result: Optional[dict]) -> Optional[str]:
+    """agy's `finished_reason` from a json/stream-json result, or None if absent."""
+    reason = (result or {}).get("finished_reason")
+    return reason if isinstance(reason, str) and reason else None
+
+
+def _finished_early_error(
+    reason: str, partial: str, stderr: Optional[str], model: Optional[str]
+) -> RuntimeError:
+    """The error for a turn agy says it ended early for a reason other than a timeout.
+
+    Same contract as _print_timeout_error: a cut-short answer is an error, and the
+    partial text rides along, labelled as cut, instead of being passed off as whole.
+    """
+    msg = f"agy ended the turn early (finished_reason={reason}), so its answer is incomplete."
+    stderr = (stderr or "").strip()
+    if stderr:
+        msg += f"\nstderr: {stderr[-1000:]}"
+    msg = _with_quota_note(msg, stderr, model)
+    partial = (partial or "").strip()
+    if partial:
+        msg += f"\n\n--- partial answer, cut off mid-turn ({len(partial)} chars) ---\n{partial}"
+    return RuntimeError(msg)
 
 
 def _build_agy_args(
@@ -1668,6 +2601,8 @@ def _build_agy_args(
     timeout_s: int,
     model: Optional[str] = None,
     output_format: Optional[str] = None,
+    plan: bool = False,
+    schema: Optional[str] = None,
 ) -> tuple[list[str], Optional[str]]:
     """Build agy's argv and resolve the pinned conversation id for continue mode.
 
@@ -1688,9 +2623,16 @@ def _build_agy_args(
     sandbox-blocked terminal run writes no JSONL transcript for us to read. No agy
     flag makes print mode safe; see the module docstring's SECURITY note.
     """
-    args = _agy_base_args(timeout_s)
+    args = _agy_base_args(timeout_s, plan)
     if output_format:
         args.extend(["--output-format", output_format])
+    if schema:
+        # agy 1.1.8's --json-schema, same release as --output-format json. Pairs with
+        # either JSON form: on "json" the validated object lands in the result's
+        # structured_output field, on "stream-json" in the terminal result event.
+        # Passed as inline text rather than a temp file (agy accepts both) — argv is
+        # a list, so there is no quoting to get wrong and no file to clean up.
+        args.extend(["--json-schema", schema])
     if model:
         args.extend(["--model", model])
     pinned_conv: Optional[str] = None
@@ -1715,6 +2657,8 @@ def _run_agy(
     continue_conv: bool,
     timeout_s: int,
     model: Optional[str] = None,
+    plan: bool = False,
+    schema: Optional[str] = None,
     pin: bool = True,
 ) -> str:
     """Run one agy print-mode call under _AGY_LOCK and return its answer.
@@ -1735,6 +2679,8 @@ def _run_agy(
         timeout_s,
         model,
         output_format="json" if use_json else None,
+        plan=plan,
+        schema=schema,
     )
 
     with _AGY_LOCK:
@@ -1747,21 +2693,39 @@ def _run_agy(
             timeout_s,
             len(prompt),
         )
-        proc = subprocess.run(
+        proc = proc_tree.run_captured(
             args,
             cwd=workspace,
             stdin=subprocess.DEVNULL,
-            capture_output=True,
             **_TEXT,
             timeout=timeout_s + 30,
             **_spawn_kwargs(),  # keep agy's TTY writes out of the host terminal
         )
         log.debug("agy exited %s in %.1fs", proc.returncode, time.time() - start)
+        stdout_answer = (proc.stdout or "").strip()
+        result = _parse_json_result(stdout_answer) if use_json else None
+        reason = _finished_reason(result)
+        if _print_timed_out(proc.stderr) or reason == "print_timeout":
+            # Checked BEFORE the exit code: agy 1.5.0 made an expired --print-timeout
+            # exit 3 (status ERROR, finished_reason print_timeout, the partial text
+            # in `response`), where 1.2.0-1.4.x exited 0. Both are the same cut turn
+            # and get the same error — see _print_timeout_error. Still record the
+            # conversation: it is this workspace's newest thread, and leaving the
+            # previous id in place would point a later continue at an older one.
+            conv_id = (result or {}).get("conversation_id") or ""
+            if conv_id and pin:
+                _record_conv_id(workspace, conv_id)
+            partial = (result.get("response") or "") if result is not None else stdout_answer
+            raise _print_timeout_error(timeout_s, partial)
         if proc.returncode != 0:
             raise RuntimeError(
-                f"agy exited {proc.returncode}\n"
-                f"stderr: {proc.stderr[-1000:]}\n"
-                f"stdout: {proc.stdout[-500:]}"
+                _with_quota_note(
+                    f"agy exited {proc.returncode}\n"
+                    f"stderr: {proc.stderr[-1000:]}\n"
+                    f"stdout: {proc.stdout[-500:]}",
+                    f"{proc.stderr}\n{proc.stdout[-2000:]}",
+                    model,
+                )
             )
 
         # agy 1.0.15 fixed the print-mode stdout bug (Windows): `agy -p` now writes
@@ -1772,9 +2736,9 @@ def _run_agy(
         # SQLite formats). Older agy — and, per the 1.0.15 changelog, non-Windows
         # platforms — still leave stdout empty; those fall through to the
         # transcript/.db scrape below, unchanged. A --sandbox run likewise writes
-        # nothing to stdout, so it too uses the fallback.
-        stdout_answer = (proc.stdout or "").strip()
-
+        # nothing to stdout, so it too uses the fallback. (stdout_answer is read above,
+        # before the exit check.)
+        #
         # agy 1.1.8+: stdout is a structured result object rather than bare text
         # (we asked for it via --output-format json). Parsing it beats trusting the
         # text layout — `response` is a contractual field, and `conversation_id`
@@ -1782,7 +2746,27 @@ def _run_agy(
         # from shared state. Record that id so a later continue pins to this thread.
         # A None result means agy gave us plain text after all (an agy that ignored
         # the flag), which falls through to the text path below unchanged.
-        result = _parse_json_result(stdout_answer) if use_json else None
+        if reason in _FINISHED_EARLY_REASONS:
+            # Exit 0 and status SUCCESS, but the turn was cut (interrupted or error;
+            # a timeout was handled above) — see _FINISHED_EARLY_REASONS. Record the
+            # conversation for the same reason as above.
+            conv_id = (result or {}).get("conversation_id") or ""
+            if conv_id and pin:
+                _record_conv_id(workspace, conv_id)
+            partial = (result.get("response") or "") if result is not None else stdout_answer
+            raise _finished_early_error(reason, partial, proc.stderr, model)
+        if reason:
+            # A value newer than this bridge. The field is documented as present only
+            # on an early end, but its vocabulary may grow; like an unexpected status,
+            # note it rather than discard what may be a whole answer.
+            log.warning("agy reported finished_reason=%s; returning its answer", reason)
+        if schema is not None and result is None:
+            raise RuntimeError(
+                "agy produced no structured result object for a --json-schema run "
+                "(it fell back to plain text). The schema contract cannot be met, and "
+                "returning prose to a caller that asked for a shape would fail at their "
+                "end instead of here."
+            )
         if result is not None:
             conv_id = result.get("conversation_id") or ""
             if conv_id:
@@ -1790,6 +2774,10 @@ def _run_agy(
                     _record_conv_id(workspace, conv_id)
                 pinned_conv = pinned_conv or conv_id
             status = result.get("status")
+            if schema is not None:
+                # The schema run's contract is structured_output, not `response` —
+                # see _structured_answer for why the two are not interchangeable.
+                return _structured_answer(result, conv_id)
             answer = (result.get("response") or "").strip()
             log.debug(
                 "agy json result: status=%s conv=%s answer_chars=%d",
@@ -1908,807 +2896,14 @@ def _newest_new_conv(start: float, exclude: set[str]) -> Optional[str]:
     return best
 
 
-# Live "watch" viewer state, served over a localhost HTTP server to a browser page.
-# Keyed by a run id so CONCURRENT watched runs (e.g. a codex_ask and a copilot_ask
-# at once — they don't share _AGY_LOCK) each get their own window + state instead of
-# clobbering one shared one. Sequential runs reuse the "main" slot and its open
-# window; a run that starts while "main" is still working gets a fresh id + window.
-_MAIN = "main"
-_WATCH_RUNS: dict[str, dict] = {}
-_WATCH_LOCK = threading.Lock()
-_WATCH_SERVER: Optional[tuple] = None  # (httpd, port, thread) singleton
-_VIEWER_ALIVE_S = 4.0  # a /events poll within this window means a viewer is still open
-
-
-def _watch_state(rid, title, start, timeout, backend, prompt, history, last_poll) -> dict:
-    return {
-        "id": rid,
-        "title": title,  # short single-line caption (first prompt line, ≤200 chars)
-        "prompt": prompt or title,  # the FULL untruncated prompt, shown in the bubble
-        "history": list(history or []),  # prior turns (continue mode); [] for a fresh ask
-        "status": "working",  # working | done | error
-        "started": start,
-        "elapsed": 0.0,
-        "timeout": timeout,  # this run's timeout_s, for the time progress bar
-        "answer": "",
-        "image": "",  # absolute path to a generated image to show, or ""
-        "events": [],  # list of {kind, text, t}
-        "backend": backend,  # "agy" | "codex" | "copilot" (shown in the header)
-        "last_poll": last_poll,  # last /events poll time (0 = never); drives window reuse
-    }
-
-
-_WATCH_IDLE = {
-    "status": "idle",
-    "started": 0.0,
-    "elapsed": 0.0,
-    "timeout": 0.0,
-    "title": "",
-    "prompt": "",
-    "history": [],
-    "answer": "",
-    "image": "",
-    "events": [],
-    "backend": "agy",
-}
-
-
-def _watch_evict_locked(now: float) -> None:
-    """Drop finished, unwatched non-main runs so the map can't grow without bound."""
-    stale = [
-        r
-        for r, s in _WATCH_RUNS.items()
-        if r != _MAIN and s["status"] in ("done", "error") and now - s["last_poll"] > 60
-    ]
-    for rid in stale:
-        _WATCH_RUNS.pop(rid, None)
-
-
-def _watch_begin(
-    title: str,
-    start: float,
-    timeout: float = 0.0,
-    backend: str = "agy",
-    prompt: str = "",
-    history: Optional[list] = None,
-) -> str:
-    """Start a watched run and return its id. Reuses the "main" slot for the common
-    sequential case; a run that begins while "main" is still working gets a fresh id
-    (and its own window) so concurrent runs never clobber each other's window."""
-    with _WATCH_LOCK:
-        _watch_evict_locked(start)
-        main = _WATCH_RUNS.get(_MAIN)
-        if main is not None and main["status"] == "working":
-            rid, last_poll = uuid.uuid4().hex, 0.0
-        else:
-            # keep the open window's poll time so _open_watch_window can reuse it
-            rid, last_poll = _MAIN, (main["last_poll"] if main else 0.0)
-        _WATCH_RUNS[rid] = _watch_state(
-            rid, title, start, timeout, backend, prompt, history, last_poll
-        )
-        return rid
-
-
-def _watch_set_image(rid: str, path: str) -> None:
-    with _WATCH_LOCK:
-        st = _WATCH_RUNS.get(rid)
-        if st is not None:
-            st["image"] = path
-
-
-def _watch_append(rid: str, events: list[dict]) -> None:
-    with _WATCH_LOCK:
-        st = _WATCH_RUNS.get(rid)
-        if st is not None:
-            st["events"].extend(events)
-            st["elapsed"] = round(time.time() - st["started"], 1)
-
-
-def _watch_finish(rid: str, status: str, answer: str, elapsed: float) -> None:
-    with _WATCH_LOCK:
-        st = _WATCH_RUNS.get(rid)
-        if st is not None:
-            st["status"] = status
-            st["answer"] = answer
-            st["elapsed"] = round(elapsed, 1)
-
-
-def _watch_snapshot(rid: str = _MAIN) -> dict:
-    with _WATCH_LOCK:
-        st = _WATCH_RUNS.get(rid)
-        if st is None:
-            return dict(_WATCH_IDLE)
-        snap = dict(st)
-        snap["events"] = list(st["events"])
-        return snap
-
-
-def _watch_mark_poll(rid: str) -> None:
-    with _WATCH_LOCK:
-        st = _WATCH_RUNS.get(rid)
-        if st is not None:
-            st["last_poll"] = time.time()
-
-
-# Per-process secret for the watch viewer. The bridge embeds it in every URL it
-# opens; a request without it is refused. Regenerated each run, never persisted.
-_WATCH_TOKEN = secrets.token_urlsafe(16)
-
-# Hostnames a watch request may claim. Anything else is a rebinding attempt.
-_WATCH_LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
-
-
-def _watch_authorized(host_header: Optional[str], path: str) -> bool:
-    """Whether a watch-server request may be served. Two independent checks.
-
-    The viewer serves the prompts, the answers, and the real commands the agents
-    ran. It binds 127.0.0.1 on an ephemeral port, but binding alone is not an
-    access boundary, and the server is started lazily and never stopped — one
-    watch=true run leaves the port open for the life of the process.
-
-    HOST: the Host header's hostname must be a loopback literal. A browser
-    reaches a DNS-rebinding target under the ATTACKER's hostname, so rejecting
-    anything that isn't 127.0.0.1/localhost kills that vector outright — it is
-    the standard defense, and cheaper than any origin allowlist. A missing Host
-    is refused; every browser sends one, and the browser we launch is the only
-    client this server has.
-
-    TOKEN: a per-process secret carried as `k` in the query string, compared with
-    hmac.compare_digest. The Host check cannot stop another LOCAL process (or
-    another user on a shared machine) from simply connecting, since it can send
-    whatever Host it likes; the token can, and costs nothing because the bridge
-    opens every one of these URLs itself.
-    """
-    from urllib.parse import parse_qs, urlparse
-
-    host = (host_header or "").strip()
-    if not host:
-        return False
-    if host.startswith("["):  # IPv6 literal, optionally followed by :port
-        hostname = host[: host.find("]") + 1]
-    else:
-        hostname = host.rsplit(":", 1)[0] if ":" in host else host
-    if hostname.lower() not in _WATCH_LOCAL_HOSTS:
-        return False
-    token = parse_qs(urlparse(path).query).get("k", [""])[0]
-    return hmac.compare_digest(token, _WATCH_TOKEN)
-
-
-def _watch_url(port: int, rid: str) -> str:
-    """The viewer URL for `rid`, carrying the token the server requires."""
-    return f"http://127.0.0.1:{port}/?id={rid}&k={_WATCH_TOKEN}"
-
-
-def _watch_image_allowed(path: str) -> bool:
-    with _WATCH_LOCK:
-        return bool(path) and any(s["image"] == path for s in _WATCH_RUNS.values())
-
-
-class _StreamWatch:
-    """Turns agy's `--output-format stream-json` stdout into live watch events.
-
-    The 1.1.8 replacement for _WatchFeed's transcript polling: instead of re-reading
-    an undocumented JSONL file on a timer and inferring which conversation is ours,
-    we consume the typed NDJSON events agy emits as it works. Verified live that they
-    arrive INCREMENTALLY (a 17 s run spread its 18 events over 12.4 s), which is the
-    whole premise — a buffered stream would make the viewer useless.
-
-    Event shapes (agy 1.1.8, verified live):
-      {"event":"init","conversation_id":…,"init":{cwd,tools,permission_mode}}
-      {"event":"step_update","step_update":{conversation_id,step_index,state,
-          step_type,tool_name?,text_delta?,tool_info?{name,parameters,output},…}}
-      {"event":"result","result":{conversation_id,status,response,usage,…}}
-
-    `state` is ACTIVE then DONE for a given step_index. agent_response text arrives
-    as INCREMENTAL `text_delta` fragments that must be concatenated per step (the
-    DONE update's delta is usually just the trailing newline), so narration is
-    emitted once a step completes rather than per fragment. Tool steps carry
-    `tool_info.parameters.CommandLine` as a REAL nested object — unlike the
-    transcript, which stores tool args JSON-encoded inside a string and needs
-    _clean_tool_arg to unwrap.
-
-    Thread-safe by construction: feed_line runs on the stdout reader thread and only
-    touches this instance plus _watch_append (which takes _WATCH_LOCK).
-    """
-
-    def __init__(self, rid: str, start: float) -> None:
-        self._rid = rid
-        self._start = start
-        self._text: dict[int, list[str]] = {}  # step_index -> accumulated deltas
-        self._emitted: set[int] = set()  # step indices already turned into events
-        self.conv_id: Optional[str] = None
-        self.result: Optional[dict] = None
-        self.saw_event = False  # any well-formed event at all (i.e. agy honoured the flag)
-
-    def _emit(self, kind: str, text: str) -> None:
-        if not text:
-            return
-        _watch_append(
-            self._rid, [{"kind": kind, "text": text, "t": round(time.time() - self._start, 1)}]
-        )
-
-    def feed_line(self, line: str) -> None:
-        """Parse one NDJSON line and append any watch events it implies.
-
-        Never raises: a malformed or unrecognised line is ignored, so an agy that
-        changes or drops the format degrades to "no live steps" rather than killing
-        the run (the answer still resolves from the result event or the transcript).
-        """
-        line = (line or "").strip()
-        if not line.startswith("{"):
-            return
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            return
-        if not isinstance(event, dict):
-            return
-        kind = event.get("event")
-        self.saw_event = True
-        if event.get("conversation_id") and not self.conv_id:
-            self.conv_id = event["conversation_id"]
-
-        if kind == "result":
-            result = event.get("result")
-            if isinstance(result, dict):
-                self.result = result
-                if result.get("conversation_id"):
-                    self.conv_id = result["conversation_id"]
-            return
-        if kind != "step_update":
-            return
-
-        step = event.get("step_update")
-        if not isinstance(step, dict):
-            return
-        if step.get("conversation_id") and not self.conv_id:
-            self.conv_id = step["conversation_id"]
-        idx = step.get("step_index")
-        stype, state = step.get("step_type"), step.get("state")
-
-        if stype == "agent_response":
-            if isinstance(idx, int) and step.get("text_delta"):
-                self._text.setdefault(idx, []).append(step["text_delta"])
-            if state == "DONE" and isinstance(idx, int) and idx not in self._emitted:
-                self._emitted.add(idx)
-                full = "".join(self._text.get(idx, [])).strip()
-                if full:
-                    self._emit("narration", full.splitlines()[0][:200])
-        elif stype == "tool":
-            info = step.get("tool_info") or {}
-            params = info.get("parameters") or {}
-            if state == "ACTIVE":
-                cmd = params.get("CommandLine") or info.get("name") or step.get("tool_name") or ""
-                self._emit("command", str(cmd)[:200])
-            elif state == "DONE":
-                self._emit("result", "command finished")
-
-
-class _WatchFeed:
-    """Locks onto this run's conversation and turns new transcript entries into
-    rich step events (narration / command / result) appended to the shared watch
-    state. For a new conversation it locks onto the first brain dir that appears
-    after launch and didn't pre-exist, and never switches away from it.
-
-    The pre-1.1.8 fallback. agy 1.1.8+ runs use _StreamWatch instead, which reads
-    agy's own typed event stream rather than scraping this undocumented transcript;
-    this path stays for older agy (and is why _clean_tool_arg still exists)."""
-
-    def __init__(self, pinned_conv: Optional[str], start: float, rid: str = _MAIN) -> None:
-        self._start = start
-        self._rid = rid
-        self._pre = set() if pinned_conv else _existing_conv_names()
-        self._conv = pinned_conv
-        self._cursor = len(_transcript_entries(pinned_conv)) if pinned_conv else 0
-
-    @property
-    def conv(self) -> Optional[str]:
-        return self._conv
-
-    def pump(self) -> None:
-        if self._conv is None:
-            self._conv = _newest_new_conv(self._start, self._pre)
-            if self._conv is None:
-                return
-            self._cursor = 0
-        entries = _transcript_entries(self._conv)
-        new_events = []
-        for entry in entries[self._cursor :]:
-            for kind, text in _entry_to_watch_lines(entry):
-                t = round(time.time() - self._start, 1)
-                new_events.append({"kind": kind, "text": text, "t": t})
-        self._cursor = max(self._cursor, len(entries))
-        if new_events:
-            _watch_append(self._rid, new_events)
-
-
-# Self-contained dark-theme page: polls /events and renders steps live, with a
-# spinner while working and the final answer card on completion. Resets its view
-# when `started` changes, so one browser tab can be reused across runs.
-# Terminal-styled page with typewriter step reveal and a Markdown-rendered answer.
-# __WIN_W__/__WIN_H__ are substituted per request (see _watch_html).
-_WATCH_HTML = """<!doctype html><html lang="en" translate="no"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="google" content="notranslate">
-<title>Agent Intern — watching agy</title>
-<style>
-:root{
- --bg:#0a0c10;--fg:#d6d6d6;--dim:#6a7480;--green:#3fdf7f;--cyan:#5cd6e6;
- --red:#ff6b6b;--bd:#191c22;--code:#06080b;
- --ubg:#13251c;--ubd:#2a5a41;--uc:#e9f6ee;
-}
-*{box-sizing:border-box}
-html,body{margin:0;height:100%;background:var(--bg)}
-body{
- color:var(--fg);
- font:13px/1.6 ui-monospace,"Cascadia Mono",Consolas,"DejaVu Sans Mono",monospace;
-}
-::-webkit-scrollbar{width:9px}::-webkit-scrollbar-thumb{background:#23262d;border-radius:6px}
-.top{position:sticky;top:0;z-index:3;background:var(--bg)}
-header{
- display:flex;align-items:center;gap:8px;
- padding:8px 13px;background:#0d0f14;border-bottom:1px solid var(--bd);
- font-size:12px;color:var(--dim);
-}
-.name{color:var(--green);font-weight:700;text-shadow:0 0 10px rgba(63,223,127,.4)}
-.wlabel{color:var(--dim)}
-.pill{margin-left:auto;display:flex;align-items:center;gap:7px;font-variant-numeric:tabular-nums}
-.dot{
- width:7px;height:7px;border-radius:50%;background:var(--cyan);
- box-shadow:0 0 9px var(--cyan);animation:pop .45s ease;
-}
-.dot.err{background:var(--red);box-shadow:0 0 8px var(--red)}
-@keyframes pop{0%{transform:scale(.2)}55%{transform:scale(1.5)}100%{transform:scale(1)}}
-.spin{
- color:var(--green);display:inline-block;width:9px;text-align:center;
- text-shadow:0 0 8px rgba(63,223,127,.6);
-}
-#elapsed{color:#556}
-.gbar{height:2px;background:#11141a}
-.gfill{
- height:100%;width:0;background:linear-gradient(90deg,var(--green),var(--cyan));
- box-shadow:0 0 8px rgba(92,214,230,.5);transition:width .5s linear;
-}
-/* --- chat conversation --- */
-#chat{
- max-width:960px;margin:0 auto;padding:16px 14px 46px;
- display:flex;flex-direction:column;gap:11px;
-}
-.msg{display:flex;max-width:100%;animation:rise .28s ease both}
-@keyframes rise{from{opacity:0;transform:translateY(7px)}}
-.msg.user{justify-content:flex-end}
-.msg.bot{justify-content:flex-start}
-.role{font-size:9px;letter-spacing:1.4px;font-weight:700;opacity:.7;margin:0 3px 3px}
-.wrap{display:flex;flex-direction:column;max-width:84%}
-.msg.user .wrap{align-items:flex-end}
-.bubble{
- position:relative;padding:9px 13px;border-radius:15px;word-break:break-word;
- box-shadow:0 1px 2px rgba(0,0,0,.25);
-}
-.bubble.user{
- background:var(--ubg);border:1px solid var(--ubd);color:var(--uc);
- border-bottom-right-radius:5px;
-}
-.bubble.bot{
- background:#0c0e13;border:1px solid var(--bd);border-bottom-left-radius:5px;
-}
-.btext{white-space:pre-wrap;word-break:break-word}
-.bubble.user.clampable .btext{
- max-height:7.4em;overflow:hidden;
- -webkit-mask-image:linear-gradient(180deg,#000 72%,transparent);
-}
-.bubble.user.expanded .btext{max-height:60vh;overflow:auto;-webkit-mask-image:none}
-.exp{
- margin-top:6px;font-size:10.5px;color:var(--cyan);cursor:pointer;
- user-select:none;opacity:.85;
-}
-.exp:hover{opacity:1}
-/* --- live step trace (assistant "thinking") --- */
-.trace{
- background:#0b0d12;border:1px solid var(--bd);border-radius:13px;
- border-bottom-left-radius:5px;overflow:hidden;max-width:84%;
-}
-.trace-head{
- display:flex;align-items:center;gap:8px;padding:7px 12px;cursor:pointer;
- color:var(--dim);font-size:11px;
-}
-.trace-head:hover{background:#0f1218}
-.trace-body{padding:1px 12px 9px;display:flex;flex-direction:column;gap:3px}
-.trace.collapsed .trace-body{display:none}
-.chev{margin-left:auto;color:var(--green);opacity:.7;transition:transform .2s}
-.trace.collapsed .chev{transform:rotate(-90deg)}
-.ty{display:inline-flex;gap:3px;align-items:center}
-.ty i{width:4px;height:4px;border-radius:50%;background:var(--green);opacity:.4;
- animation:ty 1s infinite}
-.ty i:nth-child(2){animation-delay:.16s}.ty i:nth-child(3){animation-delay:.32s}
-@keyframes ty{0%,60%,100%{opacity:.35}30%{opacity:1}}
-.step{display:flex;gap:8px;align-items:baseline;font-size:11.5px;animation:rise .2s ease both}
-.step .sym{width:11px;flex:none}
-.step .txt{white-space:pre-wrap;word-break:break-word;color:#c7ccd2}
-.step.command .sym{color:var(--green)}.step.command .txt{color:#eaeef2}
-.step.narration .sym,.step.narration .txt{color:var(--cyan)}
-.step.result .sym,.step.result .txt{color:var(--green);opacity:.55}
-/* --- markdown answer card --- */
-.md .h{font-weight:700;margin:12px 0 5px;color:#cdd9e5}
-.md .h1{font-size:16px;color:#fff}.md .h2{font-size:14px}
-.md .h3{font-size:12.5px;color:var(--green)}
-.md .p{margin:3px 0;white-space:pre-wrap;word-break:break-word}
-.md .li{display:flex;gap:8px;margin:2px 0}
-.md .bul{color:var(--green);flex:none;min-width:14px;text-align:right}
-.md .lit{white-space:pre-wrap;word-break:break-word}
-.md pre.code{
- background:var(--code);border-left:2px solid var(--green);border-radius:4px;
- padding:9px 11px;margin:7px 0;overflow:auto;white-space:pre;color:#e9efe9;
-}
-.md code{background:#16191f;padding:1px 5px;border-radius:4px;color:#9fe6ad}
-.md .lnk{color:var(--cyan);border-bottom:1px dotted #2a6b73}
-.md strong{color:#fff}
-.md .copy{
- position:absolute;top:7px;right:8px;background:#0e1218;border:1px solid var(--bd);
- color:var(--dim);font:inherit;font-size:10px;padding:2px 8px;border-radius:5px;
- cursor:pointer;opacity:0;transition:opacity .15s,color .15s,border-color .15s;
-}
-.bubble.bot:hover .copy{opacity:.92}
-.md .copy:hover{color:var(--green);border-color:#2a3340}
-.shot{max-width:100%;border:1px solid var(--bd);border-radius:12px;display:block;
- animation:rise .3s ease both}
-.hint{
- position:fixed;bottom:7px;right:12px;color:#3b414a;font-size:10.5px;
- pointer-events:none;user-select:none;
-}
-.jump{
- position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#12161d;
- border:1px solid #2a3340;color:var(--cyan);font-size:11.5px;padding:5px 13px;
- border-radius:20px;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.5);
- animation:rise .3s;z-index:4;
-}
-</style></head><body>
-<div class="top">
- <header>
-  <span class="name">Agent Intern</span><span class="wlabel" id="wlabel">— watching agy</span>
-  <span class="pill" id="pill">
-   <span class="dot" id="dot" style="display:none"></span>
-   <span class="spin" id="spin"></span>
-   <span id="status">working</span><span id="elapsed"></span>
-  </span>
- </header>
- <div class="gbar"><div class="gfill" id="gfill"></div></div>
-</div>
-<div id="chat"></div>
-<div class="jump" id="jump" style="display:none">↓ jump to latest</div>
-<div class="hint">⏎ / esc · close</div>
-<script>
-try{window.resizeTo(__WIN_W__,__WIN_H__);}catch(e){}
-document.addEventListener("keydown",e=>{
- if(e.key==="Enter"||e.key==="Escape"){try{window.close();}catch(_){}}
-});
-const SYM={narration:"▸",command:"$",result:"✓"};
-let started=null,seen=0,finished=false,follow=true,traceEl=null,traceBody=null;
-const RID=new URLSearchParams(location.search).get("id")||"main";
-const K=encodeURIComponent(new URLSearchParams(location.search).get("k")||"");
-const $=id=>document.getElementById(id);
-const chat=()=>$("chat");
-function toBottom(){window.scrollTo(0,document.body.scrollHeight);}
-function maybeBottom(){if(follow)toBottom();}
-window.addEventListener("scroll",()=>{
- follow=window.innerHeight+window.scrollY>=document.body.scrollHeight-44;
- $("jump").style.display=follow?"none":"";
-});
-$("jump").addEventListener("click",()=>{follow=true;$("jump").style.display="none";toBottom();});
-function copyText(txt,btn){
- navigator.clipboard.writeText(txt).then(()=>{
-  const o=btn.textContent;btn.textContent="copied ✓";setTimeout(()=>btn.textContent=o,1200);
- }).catch(()=>{});
-}
-const FR="⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";let fi=0,spinT=null;
-function startSpin(){
- if(spinT)return;
- spinT=setInterval(()=>{$("spin").textContent=FR[fi=(fi+1)%FR.length];},80);
-}
-function stopSpin(){if(spinT){clearInterval(spinT);spinT=null;}$("spin").textContent="";}
-function esc(s){return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
-function inl(s){
- return s.replace(/\\[([^\\]]+)\\]\\(([^)]+)\\)/g,"<span class='lnk'>$1</span>")
-         .replace(/`([^`]+)`/g,(m,c)=>"<code>"+c+"</code>")
-         .replace(/\\*\\*([^*]+)\\*\\*/g,"<strong>$1</strong>");
-}
-function md(src){
- const lines=esc(src).split("\\n"),out=[];let inC=false,code="";
- for(const ln of lines){
-  const f=ln.match(/^```(\\w*)\\s*$/);
-  if(f){if(!inC){inC=true;code="";}else{inC=false;
-   out.push("<pre class='code'>"+code.replace(/\\n$/,"")+"</pre>");}continue;}
-  if(inC){code+=ln+"\\n";continue;}
-  const h=ln.match(/^(#{1,6})\\s+(.*)$/);
-  if(h){out.push("<div class='h h"+h[1].length+"'>"+inl(h[2])+"</div>");continue;}
-  const b=ln.match(/^\\s*[-*]\\s+(.*)$/);
-  if(b){out.push("<div class='li'><span class='bul'>•</span>"+
-   "<span class='lit'>"+inl(b[1])+"</span></div>");continue;}
-  const n=ln.match(/^\\s*(\\d+)\\.\\s+(.*)$/);
-  if(n){out.push("<div class='li'><span class='bul'>"+n[1]+".</span>"+
-   "<span class='lit'>"+inl(n[2])+"</span></div>");continue;}
-  if(ln.trim()==="")continue;
-  out.push("<div class='p'>"+inl(ln)+"</div>");
- }
- if(inC)out.push("<pre class='code'>"+code+"</pre>");
- return out.join("");
-}
-// A user prompt as a right-aligned chat bubble; long ones clamp with an expander.
-function userBubble(text,role){
- const m=document.createElement("div");m.className="msg user";
- const wrap=document.createElement("div");wrap.className="wrap";
- if(role){const r=document.createElement("div");r.className="role";
-  r.textContent=role;wrap.appendChild(r);}
- const b=document.createElement("div");b.className="bubble user clampable";
- const t=document.createElement("div");t.className="btext";t.textContent=text||"";
- b.appendChild(t);wrap.appendChild(b);m.appendChild(wrap);chat().appendChild(m);
- requestAnimationFrame(()=>{
-  if(t.scrollHeight>t.clientHeight+2){
-   const x=document.createElement("div");x.className="exp";x.textContent="show more ▾";
-   x.onclick=()=>{const e=b.classList.toggle("expanded");
-    x.textContent=e?"show less ▴":"show more ▾";maybeBottom();};
-   b.appendChild(x);
-  }else{b.classList.remove("clampable");}
-  maybeBottom();
- });
- return b;
-}
-// An assistant answer as a left-aligned markdown card (with optional copy button).
-function botCard(text,copy,role){
- const m=document.createElement("div");m.className="msg bot";
- const wrap=document.createElement("div");wrap.className="wrap";
- if(role){const r=document.createElement("div");r.className="role";
-  r.textContent=role;wrap.appendChild(r);}
- const b=document.createElement("div");b.className="bubble bot md";
- b.innerHTML=md(text||"");
- if(copy){const cp=document.createElement("button");cp.className="copy";cp.textContent="copy";
-  cp.onclick=()=>copyText(text,cp);b.appendChild(cp);}
- wrap.appendChild(b);m.appendChild(wrap);chat().appendChild(m);
- return b;
-}
-// The live "thinking" trace under the current prompt (streams steps; collapsible).
-function newTrace(){
- const m=document.createElement("div");m.className="msg bot";
- const tr=document.createElement("div");tr.className="trace";
- tr.innerHTML="<div class='trace-head'><span class='ty'><i></i><i></i><i></i></span>"+
-  "<span class='tlabel'>working…</span><span class='chev'>▾</span></div>"+
-  "<div class='trace-body'></div>";
- m.appendChild(tr);chat().appendChild(m);
- tr.querySelector(".trace-head").onclick=()=>tr.classList.toggle("collapsed");
- traceEl=tr;traceBody=tr.querySelector(".trace-body");
-}
-function addStep(e){
- if(!traceBody)return;
- const r=document.createElement("div");r.className="step "+e.kind;
- r.innerHTML="<span class='sym'></span><span class='txt'></span>";
- r.querySelector(".sym").textContent=SYM[e.kind]||"·";
- r.querySelector(".txt").textContent=e.text;
- traceBody.appendChild(r);maybeBottom();
-}
-function rebuild(s){
- chat().innerHTML="";seen=0;finished=false;follow=true;traceEl=null;traceBody=null;
- $("dot").style.display="none";$("dot").classList.remove("err");
- $("gfill").style.width="0";$("gfill").style.background="";
- $("jump").style.display="none";startSpin();
- (s.history||[]).forEach(t=>{
-  if(t.role==="user")userBubble(t.content,"CLAUDE");
-  else botCard(t.content,false,(s.backend||"agy").toUpperCase());
- });
- userBubble(s.prompt||s.title||"","CLAUDE");
- newTrace();
-}
-function finish(s){
- finished=true;stopSpin();$("dot").style.display="";
- $("gfill").style.width="100%";
- if(s.status==="error"){$("dot").classList.add("err");$("gfill").style.background="var(--red)";}
- $("status").textContent=(s.status==="error"?"failed":"done")+" in "+(s.elapsed||0).toFixed(1)+"s";
- $("elapsed").textContent="";
- if(traceEl){
-  traceEl.classList.add("collapsed");
-  const lbl=traceEl.querySelector(".tlabel");if(lbl)lbl.textContent=seen+" steps ✓";
-  const ty=traceEl.querySelector(".ty");if(ty)ty.remove();
- }
- if(s.image){
-  const m=document.createElement("div");m.className="msg bot";
-  const wrap=document.createElement("div");wrap.className="wrap";
-  const im=document.createElement("img");im.className="shot";
-  im.onload=maybeBottom;im.src="/image?k="+K+"&p="+encodeURIComponent(s.image);
-  wrap.appendChild(im);m.appendChild(wrap);chat().appendChild(m);
- }
- if(s.answer)botCard(s.answer,true,(s.backend||"agy").toUpperCase());
- maybeBottom();
-}
-async function tick(){
- try{
-  const s=await (await fetch("/events?id="+RID+"&k="+K,{cache:"no-store"})).json();
-  if(s.started!==started){started=s.started;rebuild(s);}
-  const back=s.backend||"agy";
-  $("wlabel").textContent="— watching "+back;
-  document.title="Agent Intern — "+back;
-  if(!finished){
-   $("status").textContent="working";
-   $("elapsed").textContent=s.elapsed?" · "+s.elapsed.toFixed(1)+"s":"";
-   const to=s.timeout||0;const fr=to>0?Math.min((s.elapsed||0)/to,.98):0.05;
-   $("gfill").style.width=Math.round(fr*100)+"%";
-  }
-  for(let i=seen;i<s.events.length;i++)addStep(s.events[i]);
-  seen=s.events.length;
-  if((s.status==="done"||s.status==="error")&&!finished)finish(s);
- }catch(e){}
- setTimeout(tick,finished?1500:400);
-}
-tick();
-</script></body></html>"""
-
-
-def _watch_html() -> str:
-    """The watch page with the configured window size substituted for resizeTo."""
-    w, h = 600, 820
-    try:
-        parts = [int(x) for x in _WATCH_WINDOW_SIZE.split(",")]
-        if len(parts) == 2:
-            w, h = parts
-    except ValueError:
-        pass
-    return _WATCH_HTML.replace("__WIN_W__", str(w)).replace("__WIN_H__", str(h))
-
-
-def _ensure_watch_server() -> int:
-    """Lazily start the localhost watch server (once per process); return its port.
-
-    Binds 127.0.0.1 only — the page and events never leave the local machine.
-    Started lazily but never stopped, so once any watch=true run happens the port
-    stays open for the life of the process; see _watch_authorized for why that
-    makes the Host check and the token load-bearing rather than decorative.
-    """
-    global _WATCH_SERVER
-    if _WATCH_SERVER is not None:
-        return _WATCH_SERVER[1]
-
-    class _Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):  # silence default stderr request logging
-            pass
-
-        def _send(self, body: bytes, content_type: str) -> None:
-            self.send_response(200)
-            self.send_header("Content-Type", content_type)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def do_GET(self):  # noqa: N802 (http.server API)
-            if not _watch_authorized(self.headers.get("Host"), self.path):
-                self.send_response(403)
-                self.end_headers()
-                return
-            if self.path.startswith("/events"):
-                from urllib.parse import parse_qs, urlparse
-
-                rid = parse_qs(urlparse(self.path).query).get("id", [_MAIN])[0]
-                _watch_mark_poll(rid)
-                self._send(json.dumps(_watch_snapshot(rid)).encode("utf-8"), "application/json")
-            elif self.path.startswith("/image"):
-                from urllib.parse import parse_qs, urlparse
-
-                # `p`, not the bare query string: the token now shares the query,
-                # so the path must be a named parameter rather than "everything
-                # after the ?".
-                path = parse_qs(urlparse(self.path).query).get("p", [""])[0]
-                fmt = (
-                    _detect_image_format(path)
-                    if _watch_image_allowed(path) and os.path.isfile(path)
-                    else None
-                )
-                if fmt:
-                    mime = {
-                        "JPEG": "image/jpeg",
-                        "PNG": "image/png",
-                        "GIF": "image/gif",
-                        "WEBP": "image/webp",
-                    }[fmt]
-                    with open(path, "rb") as fh:
-                        self._send(fh.read(), mime)
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-            else:
-                self._send(_watch_html().encode("utf-8"), "text/html; charset=utf-8")
-
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    port = httpd.server_address[1]
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-    thread.start()
-    _WATCH_SERVER = (httpd, port, thread)
-    log.debug("watch server on http://127.0.0.1:%d", port)
-    return port
-
-
-# Small dedicated viewer window. Override "WIDTH,HEIGHT" via AGY_WATCH_WINDOW_SIZE.
-_WATCH_WINDOW_SIZE = os.environ.get("AGY_WATCH_WINDOW_SIZE", "560,760")
-
-
-def _chromium_app_browsers() -> list[str]:
-    """Paths to Chromium-based browsers that support `--app` windowed mode, so the
-    viewer can open as a small chromeless window instead of a tab. Best-effort."""
-    found: list[str] = []
-    if os.name == "nt":
-        pf = os.environ.get("PROGRAMFILES", r"C:\Program Files")
-        pfx86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
-        local = os.environ.get("LOCALAPPDATA", "")
-        candidates = [
-            os.path.join(pf, "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(pfx86, "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(local, "Google", "Chrome", "Application", "chrome.exe"),
-            os.path.join(pfx86, "Microsoft", "Edge", "Application", "msedge.exe"),
-            os.path.join(pf, "Microsoft", "Edge", "Application", "msedge.exe"),
-        ]
-        found += [p for p in candidates if os.path.isfile(p)]
-    elif sys.platform == "darwin":
-        candidates = [
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        ]
-        found += [p for p in candidates if os.path.isfile(p)]
-    for name in (
-        "google-chrome",
-        "google-chrome-stable",
-        "chromium",
-        "chromium-browser",
-        "brave-browser",
-        "microsoft-edge",
-    ):
-        path = shutil.which(name)
-        if path:
-            found.append(path)
-    return found
-
-
-def _watch_viewer_live(rid: str) -> bool:
-    """True if a window is currently polling /events for this run's slot (so a new
-    run on the SAME slot should reuse it instead of stacking another window)."""
-    with _WATCH_LOCK:
-        st = _WATCH_RUNS.get(rid)
-        return st is not None and (time.time() - st["last_poll"]) < _VIEWER_ALIVE_S
-
-
-def _open_watch_window(url: str, rid: str = _MAIN) -> None:
-    """Open the watch page in a small, dedicated window. Prefers a Chromium browser
-    in `--app` mode (a sized, chromeless window — not a tab); falls back to a normal
-    new browser window/tab. Best-effort — never raises.
-
-    Reuses an already-open viewer for this run's slot (detected via recent /events
-    polls) so repeated SEQUENTIAL watch calls don't pile up windows; a concurrent run
-    got its own id upstream, so it opens its own window here. Set AGY_WATCH_ALWAYS_NEW=1
-    to force a fresh window every time."""
-    if _watch_viewer_live(rid) and not _env_truthy("AGY_WATCH_ALWAYS_NEW"):
-        log.debug("watch viewer already open for %s; reusing instead of a new window", rid)
-        return
-    for exe in _chromium_app_browsers():
-        try:
-            subprocess.Popen(
-                [exe, f"--app={url}", f"--window-size={_WATCH_WINDOW_SIZE}"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                **_spawn_kwargs(),
-            )
-            return
-        except OSError:
-            continue
-    try:
-        webbrowser.open(url, new=1)  # request a new window (clients may still tab)
-    except Exception:  # noqa: BLE001 - viewer is best-effort
-        pass
-
-
 def _run_agy_watched(
     prompt: str,
     workspace: str,
     continue_conv: bool,
     timeout_s: int,
     model: Optional[str] = None,
+    plan: bool = False,
+    schema: Optional[str] = None,
 ) -> str:
     """Like _run_agy, but open a live browser "watch" view. EXPERIMENTAL.
 
@@ -2733,6 +2928,8 @@ def _run_agy_watched(
         timeout_s,
         model,
         output_format="stream-json" if use_stream else None,
+        plan=plan,
+        schema=schema,
     )
 
     with _AGY_LOCK:
@@ -2754,7 +2951,7 @@ def _run_agy_watched(
         except Exception:  # noqa: BLE001 - the viewer is best-effort, never fatal
             pass
 
-        proc = subprocess.Popen(
+        proc = proc_tree.popen(
             args,
             cwd=workspace,
             stdin=subprocess.DEVNULL,
@@ -2775,7 +2972,7 @@ def _run_agy_watched(
         hard_deadline = start + timeout_s + 30
         while proc.poll() is None:
             if time.time() > hard_deadline:
-                proc.kill()
+                proc_tree.kill_tree(proc)  # the grandchild must die too — see proc_tree
                 _watch_finish(rid, "error", "(timed out)", time.time() - start)
                 raise RuntimeError(f"agy timed out after {timeout_s + 30}s (watched)")
             if feed is not None:
@@ -2785,10 +2982,33 @@ def _run_agy_watched(
             feed.pump()  # drain transcript entries flushed right before exit
         out_t.join(timeout=5)  # let the last events land before reading the result
         err_t.join(timeout=5)
+        reason = _finished_reason(stream.result if stream is not None else None)
+        if _print_timed_out("".join(err_chunks)) or reason == "print_timeout":
+            # Before the exit code, as in _run_agy: agy 1.5.0+ exits 3 here, older 0.
+            if stream is not None and stream.conv_id:
+                _record_conv_id(workspace, stream.conv_id)
+            partial = ((stream.result or {}).get("response") or "") if stream is not None else ""
+            _watch_finish(rid, "error", "(timed out)", time.time() - start)
+            raise _print_timeout_error(timeout_s, partial)
         if proc.returncode != 0:
             _watch_finish(rid, "error", f"(agy exited {proc.returncode})", time.time() - start)
-            stderr_tail = "".join(err_chunks)[-1000:]
-            raise RuntimeError(f"agy exited {proc.returncode}\nstderr: {stderr_tail}")
+            stderr_text = "".join(err_chunks)
+            raise RuntimeError(
+                _with_quota_note(
+                    f"agy exited {proc.returncode}\nstderr: {stderr_text[-1000:]}",
+                    f"{stderr_text}\n{''.join(_out)[-2000:]}",
+                    model,
+                )
+            )
+        if reason in _FINISHED_EARLY_REASONS:
+            # Same cut-short-but-exit-0 turn as _run_agy (a timeout was handled above).
+            if stream is not None and stream.conv_id:
+                _record_conv_id(workspace, stream.conv_id)
+            partial = ((stream.result or {}).get("response") or "") if stream is not None else ""
+            _watch_finish(rid, "error", f"(ended early: {reason})", time.time() - start)
+            raise _finished_early_error(reason, partial, "".join(err_chunks), model)
+        if reason:
+            log.warning("agy reported finished_reason=%s; returning its answer", reason)
 
         # The stream's terminal `result` event is the answer, and its conversation_id
         # is agy naming its own conversation — record it so a later continue pins to
@@ -2797,6 +3017,14 @@ def _run_agy_watched(
             if stream.conv_id:
                 _record_conv_id(workspace, stream.conv_id)
             if stream.result is not None:
+                if schema is not None:
+                    try:
+                        answer = _structured_answer(stream.result, stream.conv_id or "")
+                    except RuntimeError:
+                        _watch_finish(rid, "error", "(no structured output)", time.time() - start)
+                        raise
+                    _watch_finish(rid, "done", answer, time.time() - start)
+                    return answer
                 answer = (stream.result.get("response") or "").strip()
                 status = stream.result.get("status")
                 if answer:
@@ -2813,6 +3041,17 @@ def _run_agy_watched(
                     )
             # No usable result event (agy ignored the flag, or died mid-stream):
             # fall through to the transcript scrape below, exactly as older agy does.
+
+        if schema is not None:
+            # The transcript scrape below can only ever produce prose, so a schema
+            # run that reaches here has nothing to honour its contract with.
+            _watch_finish(rid, "error", "(no structured output)", time.time() - start)
+            raise RuntimeError(
+                "agy produced no structured result object for a --json-schema run "
+                "(it fell back to plain text). The schema contract cannot be met, and "
+                "returning prose to a caller that asked for a shape would fail at their "
+                "end instead of here."
+            )
 
         resolved_conv = (
             pinned_conv or (stream.conv_id if stream else None) or (feed.conv if feed else None)
@@ -2876,7 +3115,7 @@ def _run_agy_image_watched(
         except Exception:  # noqa: BLE001 - viewer is best-effort
             pass
 
-        proc = subprocess.Popen(
+        proc = proc_tree.popen(
             args,
             cwd=workspace,
             stdin=subprocess.DEVNULL,
@@ -2896,7 +3135,7 @@ def _run_agy_image_watched(
         hard_deadline = start + timeout_s + 30
         while proc.poll() is None:
             if time.time() > hard_deadline:
-                proc.kill()
+                proc_tree.kill_tree(proc)  # the grandchild must die too — see proc_tree
                 _watch_finish(rid, "error", "(timed out)", time.time() - start)
                 raise RuntimeError(f"agy timed out after {timeout_s + 30}s (image/watch)")
             if feed is not None:
@@ -2931,6 +3170,10 @@ def _run_agy_image_watched(
             final_path, fmt, size = _finalize_image(target, agy_text, start)
         except RuntimeError as fin_err:
             _watch_finish(rid, "error", f"no image produced: {fin_err}", time.time() - start)
+            if _print_timed_out("".join(_err)):
+                # No image AND agy cut the turn at --print-timeout (exit 3 on 1.5.0+,
+                # 0 before): the timeout is the cause, not a missing file.
+                raise RuntimeError(f"{_print_timeout_error(timeout_s)} ({fin_err})") from fin_err
             if agy_error is not None:
                 raise RuntimeError(f"{fin_err} (agy also failed: {agy_error})") from agy_error
             raise
@@ -2941,1340 +3184,132 @@ def _run_agy_image_watched(
         return f"{final_path}\nformat={fmt}  size={size} bytes"
 
 
-@mcp.tool(
-    annotations={
-        "title": "Ask Antigravity (new conversation)",
-        "readOnlyHint": False,  # agy runs unsandboxed: may write files / run commands
-        "idempotentHint": False,
-        "openWorldHint": True,  # talks to the external Antigravity service
-    }
+# ------------------------------------------------------------ per-backend tools
+# Each backend's MCP tools live in <backend>_tools.py and register on `mcp` as
+# that module is imported, here, once everything they use from this module
+# exists; importing them in this order keeps the tool order clients see.
+if __name__ == "__main__":
+    # Run as a script this module is __main__, and the tool modules' `import
+    # server` would load a SECOND copy and register their tools on its `mcp`.
+    sys.modules.setdefault("server", sys.modules[__name__])
+
+
+# watch_server.py. server's own code calls some of these bare, and tests and
+# swarm_watch reach the rest as server.<name>, so bind them all here. The one
+# name watch_server REBINDS, _WATCH_SERVER, is left out: a copy made here would
+# stay None after the server starts.
+from watch_server import (  # noqa: E402, F401  (re-exported: see the comment above)
+    _MAIN,
+    _VIEWER_ALIVE_S,
+    _WATCH_HTML,
+    _WATCH_IDLE,
+    _WATCH_LOCAL_HOSTS,
+    _WATCH_LOCK,
+    _WATCH_RUNS,
+    _WATCH_TOKEN,
+    _WATCH_WINDOW_SIZE,
+    _chromium_app_browsers,
+    _ensure_watch_server,
+    _open_watch_window,
+    _StreamWatch,
+    _watch_append,
+    _watch_authorized,
+    _watch_begin,
+    _watch_evict_locked,
+    _watch_finish,
+    _watch_html,
+    _watch_image_allowed,
+    _watch_mark_poll,
+    _watch_set_image,
+    _watch_snapshot,
+    _watch_state,
+    _watch_url,
+    _watch_viewer_live,
+    _WatchFeed,
 )
-async def antigravity_ask(
-    prompt: str,
-    workspace: Optional[str] = None,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Ask Antigravity (agy CLI, Gemini by default) a question in a NEW conversation.
 
-    Uses your existing AI Pro authentication (silent-auth via Windows Credential
-    Manager). Returns the model's final response as text. Good for fast
-    tool-calling and short tasks; for heavier reasoning pick a bigger `model` or
-    use the host model directly.
+# Import order is registration order, which is the tool order clients see.
+# isort: off
+import antigravity_tools  # noqa: E402
+import swarm_tools  # noqa: E402
+import codex_tools  # noqa: E402
+import copilot_tools  # noqa: E402
+import cursor_tools  # noqa: E402
+import claude_tools  # noqa: E402
+import grok_tools  # noqa: E402
+import kimi_tools  # noqa: E402
+import opencode_tools  # noqa: E402
+import muse_tools  # noqa: E402
+# isort: on
 
-    Args:
-        prompt: Question or instruction for Antigravity.
-        workspace: Working directory for the conversation. Defaults to cwd.
-                   Choose an existing project dir for context-aware responses.
-        model: Optional model slug to run this conversation on (agy's --model),
-               e.g. "gemini-3.1-pro-high" or "claude-sonnet-4-6". Omit to use the
-               model set in agy's settings.json (gemini-3.6-flash-high by
-               default). Must be one of `agy models` — an unknown slug is
-               rejected up front (agy would otherwise silently ignore it and fall
-               back to the default). agy 1.1.5 replaced the old human labels
-               ("Gemini 3.1 Pro (High)") with these slugs and 1.1.6 added the
-               gemini-3.6-flash family; the old form is no longer accepted. See
-               antigravity_status / `agy models` for the valid slugs.
-        timeout_s: Max seconds to wait for agy to complete. Default 180.
-        watch: If true, open a live "watch" view in your browser that streams
-               agy's steps (narration + the real commands it runs) as it works.
-               agy still runs headless; the same final text is returned. Best-
-               effort and cross-platform — if the browser can't open, the run
-               completes normally. Default false.
-    """
-    ws = _normalize_workspace(workspace)
-    validate_model(model)  # fail fast on a typo (agy would silently ignore it)
-    if watch:
-        return await asyncio.to_thread(_run_agy_watched, prompt, ws, False, timeout_s, model)
-    return await _run_with_progress(_run_agy, (prompt, ws, False, timeout_s, model), ctx, timeout_s)
-
-
-@mcp.tool(
-    annotations={
-        "title": "Continue Antigravity conversation",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
+_TOOL_MODULES = (
+    antigravity_tools,
+    swarm_tools,
+    codex_tools,
+    copilot_tools,
+    cursor_tools,
+    claude_tools,
+    grok_tools,
+    kimi_tools,
+    opencode_tools,
+    muse_tools,
 )
-async def antigravity_continue(
-    prompt: str,
-    workspace: Optional[str] = None,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Continue the Antigravity conversation rooted at this workspace.
 
-    Resumes the exact conversation id recorded for `workspace` (via agy's
-    --conversation flag), not agy's global "most recent", so it stays correct
-    even if agy was used elsewhere in between. On agy 1.1.8+ that id is the one
-    agy itself reported for this bridge's last run in the workspace, so a
-    follow-up resumes THIS thread even if you have since started a separate
-    conversation in the same folder from Antigravity's own interface.
 
-    Args:
-        prompt: Follow-up message.
-        workspace: Working directory used by the prior conversation. Defaults to cwd.
-        model: Optional model slug for this turn (agy's --model), e.g.
-               "claude-sonnet-4-6". agy's model is per-invocation, not baked into
-               the conversation, so a follow-up can run on a different model than
-               the original ask — omit to use agy's settings.json default.
-               Validated against `agy models`; an unknown slug is rejected (agy
-               would silently ignore it).
-        timeout_s: Max seconds to wait for agy to complete. Default 180.
-        watch: If true, open a live "watch" view in your browser that streams
-               agy's steps as it works (same return value, best-effort). Default false.
+def _dropped_tools(enabled: tuple[str, ...]) -> list[str]:
+    """The tools to drop when only the `enabled` backends are on: every other
+    backend's, plus the swarm tools when no backend left on can be a swarm worker.
+
+    A module's tools are the public names in its __all__; the rest are helpers.
     """
-    ws = _normalize_workspace(workspace)
-    validate_model(model)  # fail fast on a typo (agy would silently ignore it)
-    if watch:
-        return await asyncio.to_thread(_run_agy_watched, prompt, ws, True, timeout_s, model)
-    return await _run_with_progress(_run_agy, (prompt, ws, True, timeout_s, model), ctx, timeout_s)
+    modules = {m.__name__.removesuffix("_tools"): m for m in _TOOL_MODULES}
+    off = [b for b in BACKENDS if b not in enabled]
+    if not _SWARM_BACKENDS.intersection(enabled):
+        off.append("swarm")
+    return [n for b in off for n in modules[b].__all__ if not n.startswith("_")]
 
 
-@mcp.tool(
-    annotations={
-        "title": "Generate an image with Antigravity",
-        "readOnlyHint": False,  # writes the generated image file to disk
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-async def antigravity_image(
-    prompt: str,
-    output_path: Optional[str] = None,
-    workspace: Optional[str] = None,
-    timeout_s: int = 240,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Generate an image with Antigravity (Gemini image model via agy CLI).
+# AGENT_INTERN_BACKENDS: a backend left off costs no context. Its module stays
+# imported, so swarm.py and server.<name> still reach its code.
+for _name in _dropped_tools(ENABLED_BACKENDS):
+    # fastmcp 3 deprecates mcp.remove_tool for the provider's; 2.x has only mcp's.
+    getattr(mcp, "local_provider", mcp).remove_tool(_name)
 
-    Drives agy to produce a raster image on your existing AI Pro quota, saves it,
-    and returns the absolute file path plus its real format and byte size. The
-    host can then read the path to view the image.
 
-    agy picks the image format itself (JPEG for photo-like images, PNG for flat
-    graphics), so the returned path's extension is corrected to match the actual
-    bytes (a requested out.png may come back as out.jpg). Runs a normal,
-    unsandboxed agy session — same privileges/caveats as the other tools (see the
-    module SECURITY note).
+def __getattr__(name: str):
+    """`server.<name>` for what moved to a tool module, so tests, swarm.py and
+    anything else written against server keep reaching it here."""
+    for mod in _TOOL_MODULES:
+        if name in mod.__all__:
+            return getattr(mod, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
-    Args:
-        prompt: Description of the image to generate.
-        output_path: Where to save. Absolute, or relative to `workspace`. If
-                     omitted, a timestamped name under `workspace` is used.
-        workspace: Working directory for the conversation. Defaults to cwd.
-        timeout_s: Max seconds to wait for agy to complete. Default 240
-                   (image generation is slower than text).
-        watch: If true, open the live "watch" window that streams agy's steps and
-               shows the finished image inline (same return value, best-effort).
-               Default false.
-    """
-    ws = _normalize_workspace(workspace)
-    target = _resolve_output_path(output_path, ws)
-    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-    wrapped = _wrap_image_prompt(prompt, target)
-    if watch:
-        return await asyncio.to_thread(
-            _run_agy_image_watched, wrapped, target, ws, timeout_s, prompt
-        )
 
-    start = time.time()
-    agy_text: Optional[str] = None
-    agy_error: Optional[Exception] = None
-    try:
-        agy_text = await _run_with_progress(
-            _run_agy, (wrapped, ws, False, timeout_s), ctx, timeout_s
-        )
-    except RuntimeError as e:
-        # The transcript read may fail even though agy wrote the image. Don't
-        # lose a successfully generated file to a transcript hiccup — try to
-        # locate it anyway, and only surface this error if nothing was produced.
-        agy_error = e
+# The first argument that makes `agent-intern` a terminal command instead of the
+# stdio server. Anything else, including no argument at all, runs the server exactly
+# as before: an MCP host config that passes an unrelated argument must keep working.
+_CLI_COMMANDS = frozenset({"doctor", "rules", "help", "--help", "-h"})
+_VERSION_FLAGS = frozenset({"--version", "-V"})
 
-    try:
-        final_path, fmt, size = _finalize_image(target, agy_text, start)
-    except RuntimeError as fin_err:
-        if agy_error is not None:
-            raise RuntimeError(f"{fin_err} (agy also failed: {agy_error})") from agy_error
-        raise
-    return f"{final_path}\nformat={fmt}  size={size} bytes"
 
-
-def _broadcast_workspaces(workspaces: Optional[list], n: int):
-    """Map the MCP `workspaces` arg to swarm's None|str|list contract.
-
-    None -> server cwd for all; a 1-item list -> that dir for all N; an N-item
-    list -> one workspace per prompt. (MCP can't pass a bare str for a list field,
-    so a 1-item list is the "same dir for everyone" shorthand.)
-    """
-    if not workspaces:
-        return None
-    if len(workspaces) == 1:
-        return workspaces[0]
-    return workspaces
-
-
-@mcp.tool(
-    annotations={
-        "title": "Agent swarm (mixed Antigravity + Codex + Copilot + Cursor, parallel)",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-def agent_swarm(
-    tasks: list[dict],
-    max_concurrency: int = 4,
-    timeout_s: int = 180,
-    watch: bool = False,
-) -> str:
-    """Run SEVERAL tasks IN PARALLEL across ALL backends in a single swarm.
-
-    Each task is its own worker and names the backend to run on, so one swarm can
-    mix Antigravity (Gemini), Codex, Copilot, Cursor, and Grok workers — they run
-    truly concurrently (capped at `max_concurrency`) and every answer comes back in
-    one labelled block. A worker that fails is reported in place; the others still
-    return.
-
-    SECURITY: this launches N unsandboxed agents at once — N times the
-    prompt-injection surface of a single call (see the module SECURITY note). Only
-    use it with trusted prompts on trusted content.
-
-    Args:
-        tasks: One object per parallel worker:
-               - backend: "antigravity" (alias "agy"/"gemini"), "codex",
-                          "copilot" (alias "gh"/"github"), "cursor", or "grok"
-                          (alias "xai"; EXPERIMENTAL — see grok_ask) (required)
-               - prompt:  the question or instruction (required)
-               - workspace: working dir for that worker (default: server cwd)
-               - sandbox: Codex/Copilot/Cursor/Grok only — "read-only" (default),
-                          "workspace-write", or "danger-full-access". Ignored for
-                          Antigravity. (Codex's is an enforced OS sandbox
-                          everywhere; Grok's is enforced on Linux/macOS only;
-                          Copilot's and Cursor's are agent/tool-level, not OS
-                          boundaries — see copilot_ask / cursor_ask / grok_ask.)
-               - model:   optional model override for ANY backend — Codex's `-m`,
-                          Copilot's/Cursor's `--model`, Grok's `-m`, or
-                          Antigravity's `--model` (an agy slug like
-                          "claude-sonnet-4-6"; validated against each backend's
-                          model list). Omit for each backend's default.
-        max_concurrency: Max workers running at once (default 4). Higher = faster
-                         but more quota/rate-limit pressure and more agents at once.
-        timeout_s: Per-worker timeout in seconds. Default 180.
-        watch: If true, open the live "Agent Swarm" dashboard window (one row per
-               worker, with a backend badge; click a row for its full step log).
-    """
-    import swarm
-
-    results = swarm.swarm_agents(tasks, max_concurrency, timeout_s, watch)
-    return swarm.format_agent_results(results)
-
-
-@mcp.tool(
-    annotations={
-        "title": "Generate several images in parallel",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-def antigravity_image_swarm(
-    prompts: list[str],
-    output_paths: Optional[list[str]] = None,
-    workspaces: Optional[list[str]] = None,
-    max_concurrency: int = 4,
-    timeout_s: int = 240,
-    watch: bool = False,
-) -> str:
-    """Generate several images IN PARALLEL with Antigravity (one worker per prompt).
-
-    Like antigravity_image, but runs N image generations concurrently in isolated
-    workers (capped at `max_concurrency`). Returns one block listing each image's
-    final path/format/size (or its error). Extensions are corrected to the real
-    bytes, exactly like antigravity_image. Same unsandboxed privileges/caveats as
-    antigravity_swarm.
-
-    Args:
-        prompts: One image description per parallel worker.
-        output_paths: Where to save each image (aligned to prompts). Omit to write
-                      timestamped files in the first workspace (or server cwd).
-        workspaces: Working directory per worker (same shorthand as antigravity_swarm).
-        max_concurrency: Max workers running at once (default 4).
-        timeout_s: Per-worker timeout in seconds. Default 240 (images are slower).
-        watch: If true, open the live dashboard; each finished image shows in its
-               pane, and clicking a row opens that agent's window beside the dashboard.
-    """
-    import swarm
-
-    n = len(prompts)
-    if output_paths is None:
-        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-        base = workspaces[0] if workspaces else os.getcwd()
-        output_paths = [os.path.join(base, f"agy-swarm-image-{stamp}-{i}.png") for i in range(n)]
-    results = swarm.swarm_image(
-        prompts,
-        output_paths,
-        workspaces=_broadcast_workspaces(workspaces, n),
-        max_concurrency=max_concurrency,
-        timeout_s=timeout_s,
-        watch=watch,
-    )
-    return swarm.format_image_results(results)
-
-
-@mcp.tool(
-    annotations={
-        "title": "agy bridge diagnostics",
-        "readOnlyHint": True,  # only reads local state + runs `agy --version`
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-def antigravity_status() -> str:
-    """Report diagnostics for the agy bridge setup (spends no AI Pro quota).
-
-    Reports the bridge's own version and whether a newer release is available
-    (best-effort GitHub check; honors AGY_BRIDGE_NO_UPDATE_CHECK), then checks
-    whether agy is on PATH (and its version/compat), how much AI Pro quota is left
-    per model family (agy 1.1.11+ answers `/usage` in print mode for free — a
-    family at 0% is reported as a problem, since every call against it will fail
-    until its window resets), whether agy's state directories exist, whether the
-    newest conversation transcript is readable, and whether the SQLite
-    conversation store is present. Use this to debug empty or failed responses —
-    or to see if the bridge itself is out of date, or if you are simply out of
-    quota — before spending quota.
-    """
-    rows = _collect_status()
-    width = max(len(label) for label, _, _ in rows)
-    lines = ["agy bridge status"]
-    for label, ok, detail in rows:
-        mark = "ok" if ok else "!!"
-        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
-    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
-    return "\n".join(lines)
-
-
-@mcp.tool(
-    annotations={
-        "title": "Ask Codex (new session)",
-        "readOnlyHint": False,  # codex may edit files when sandbox != read-only
-        "idempotentHint": False,
-        "openWorldHint": True,  # talks to the external OpenAI/Codex service
-    }
-)
-async def codex_ask(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = codex_bridge.DEFAULT_SANDBOX,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Ask OpenAI Codex (`codex exec`) a question or task in a NEW session.
-
-    Uses your existing Codex login (ChatGPT or API key — see `codex login status`).
-    Returns the agent's final message as text, read from codex's
-    --output-last-message file (no stdout scraping). Codex is a capable coding
-    agent, so this suits heavier reasoning and real code work, not just cheap
-    tool-calling. Point `workspace` at a real project dir for context-aware answers.
-
-    Args:
-        prompt: Question or instruction for Codex.
-        workspace: Working root for the session (`-C`). Defaults to the server cwd.
-        sandbox: Filesystem policy — "read-only" (default: reads and answers but
-                 writes nothing), "workspace-write" (may edit files under the
-                 workspace), or "danger-full-access" (no sandbox — avoid). `codex
-                 exec` has no interactive approval gate, so this is the real safety
-                 boundary; opt into write access deliberately.
-        model: Optional model override (`-m`); omit to use codex's configured default.
-        timeout_s: Max seconds to wait for codex to complete. Default 180.
-        watch: If true, open a live "watch" view in your browser that streams
-               codex's steps (reasoning, the commands it runs, file changes) from
-               its `--json` event stream. codex still runs headless; the same final
-               text is returned. Best-effort — if the browser can't open, the run
-               completes normally. Default false.
-    """
-    ws = codex_bridge.normalize_workspace(workspace)
-    codex_bridge.validate_sandbox(sandbox)  # fail fast with a clear message
-    if watch:
-        return await asyncio.to_thread(
-            _run_codex_watched, prompt, ws, sandbox, model, False, timeout_s
-        )
-    return await _run_with_progress(
-        codex_bridge.run_codex,
-        (prompt, ws, sandbox, model, False, timeout_s),
-        ctx,
-        timeout_s,
-        label="codex",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Continue Codex session",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-async def codex_continue(
-    prompt: str,
-    workspace: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Continue the Codex session rooted at this workspace (`codex exec resume`).
-
-    Resumes the exact session id captured from the last codex_ask in this
-    workspace, falling back to the newest on-disk session whose recorded cwd
-    matches (so it still works after a server restart). The resumed session keeps
-    its original sandbox and model — those are chosen when you start it with
-    codex_ask.
-
-    Args:
-        prompt: Follow-up message for the existing session.
-        workspace: Working root used by the prior session. Defaults to the server cwd.
-        timeout_s: Max seconds to wait for codex to complete. Default 180.
-        watch: If true, open the live "watch" view streaming codex's steps as it
-               works (same viewer as codex_ask). Default false.
-    """
-    ws = codex_bridge.normalize_workspace(workspace)
-    if watch:
-        return await asyncio.to_thread(
-            _run_codex_watched,
-            prompt,
-            ws,
-            codex_bridge.DEFAULT_SANDBOX,
-            None,
-            True,
-            timeout_s,
-        )
-    return await _run_with_progress(
-        codex_bridge.run_codex,
-        (prompt, ws, codex_bridge.DEFAULT_SANDBOX, None, True, timeout_s),
-        ctx,
-        timeout_s,
-        label="codex",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Codex bridge diagnostics",
-        "readOnlyHint": True,  # only runs `codex --version` / `codex login status`
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-def codex_status() -> str:
-    """Report diagnostics for the Codex bridge setup (spends no quota).
-
-    Reports the bridge's own version and whether a newer release is available
-    (best-effort GitHub check; honors AGY_BRIDGE_NO_UPDATE_CHECK) — the same
-    update notice antigravity_status shows, so a Codex-only install still surfaces
-    it — then checks whether codex is on PATH (and its version), whether you're
-    logged in (`codex login status` — no model call, no quota), where codex stores
-    its sessions, and how many workspace sessions are pinned this run. Use this to
-    debug "codex not found" or auth errors before spending quota.
-    """
-    rows = [_bridge_version_status()] + codex_bridge.status_rows()
-    width = max(len(label) for label, _, _ in rows)
-    lines = ["codex bridge status"]
-    for label, ok, detail in rows:
-        mark = "ok" if ok else "!!"
-        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
-    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
-    return "\n".join(lines)
-
-
-def _codex_event_to_watch_lines(ev: dict) -> list[tuple[str, str]]:
-    """Map one codex --json event to (kind, text) watch lines (kind is
-    'narration' | 'command' | 'result'), mirroring _entry_to_watch_lines for agy.
-    Returns [] for events with nothing worth showing in the viewer.
-    """
-    etype = ev.get("type")
-    if etype == "item.completed":
-        item = ev.get("item") or {}
-        itype = item.get("type")
-        if itype in ("agent_message", "reasoning"):
-            txt = (item.get("text") or item.get("summary") or "").strip()
-            return [("narration", txt.splitlines()[0][:200])] if txt else []
-        if itype == "command_execution":
-            cmd = (item.get("command") or "").strip()
-            return [("command", cmd[:200])] if cmd else []
-        if itype == "file_change":
-            changes = item.get("changes") or item.get("files") or []
-            n = len(changes) if isinstance(changes, list) else 0
-            return [("result", f"file change ({n} file(s))" if n else "file change")]
-        if itype == "mcp_tool_call":
-            return [("command", f"mcp: {item.get('tool') or item.get('name') or ''}"[:200])]
-        if itype == "web_search":
-            return [("command", f"search: {item.get('query') or ''}"[:200])]
-        return []
-    if etype == "turn.started":
-        return [("narration", "thinking…")]
-    if etype == "error":
-        return [("result", f"error: {ev.get('message') or ''}"[:200])]
-    return []
-
-
-def _run_codex_watched(
-    prompt: str,
-    workspace: str,
-    sandbox: str,
-    model: Optional[str],
-    continue_conv: bool,
-    timeout_s: int,
-) -> str:
-    """Like codex_bridge.run_codex, but stream codex's steps to the live watch
-    window. EXPERIMENTAL. Reuses the same localhost viewer as the agy watch tools;
-    the return value is identical to codex_ask.
-    """
-    start = time.time()
-    title = prompt.strip().splitlines()[0] if prompt.strip() else ""
-    if len(title) > 200:
-        title = title[:200].rsplit(" ", 1)[0] + "…"
-    history = codex_bridge.read_history(workspace, continue_conv)
-    rid = _watch_begin(title, start, timeout_s, backend="codex", prompt=prompt, history=history)
-    try:
-        port = _ensure_watch_server()
-        _open_watch_window(_watch_url(port, rid), rid)
-    except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
-        pass
-
-    def on_event(ev: dict) -> None:
-        watch_lines = _codex_event_to_watch_lines(ev)
-        if watch_lines:
-            t = round(time.time() - start, 1)
-            _watch_append(rid, [{"kind": k, "text": x, "t": t} for k, x in watch_lines])
-
-    try:
-        answer = codex_bridge.run_codex_streaming(
-            prompt, workspace, sandbox, model, continue_conv, timeout_s, on_event
-        )
-    except Exception as e:  # noqa: BLE001 — show the failure in the window, then re-raise
-        _watch_finish(rid, "error", f"({e})"[:200], time.time() - start)
-        raise
-    _watch_finish(rid, "done", answer, time.time() - start)
-    return answer
-
-
-@mcp.tool(
-    annotations={
-        "title": "Ask GitHub Copilot (new session)",
-        "readOnlyHint": False,  # copilot may edit files / run commands per sandbox
-        "idempotentHint": False,
-        "openWorldHint": True,  # talks to the external GitHub Copilot service
-    }
-)
-async def copilot_ask(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = copilot_bridge.DEFAULT_SANDBOX,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Ask the GitHub Copilot CLI (`copilot -p`) a question or task in a NEW session.
-
-    Uses your existing Copilot login (OS credential store, or a
-    COPILOT_GITHUB_TOKEN/GH_TOKEN/GITHUB_TOKEN env var — see `copilot_status`).
-    Returns the agent's final message, read straight from stdout (the CLI's `-s`
-    silent mode; no scraping). Copilot is a capable agentic coder — good for real
-    code/repo work; point `workspace` at a project dir for context-aware answers.
-
-    Args:
-        prompt: Question or instruction for Copilot.
-        workspace: Working root for the session (`-C`). Defaults to the server cwd.
-        sandbox: Permission policy (maps to copilot's tool/path flags):
-                 "read-only" (default — best-effort: denies the local write/shell
-                 tools; NOT an OS sandbox, so unlike codex it is not a hard
-                 boundary), "workspace-write" (may edit files, confined to the
-                 workspace), or "danger-full-access" (--allow-all — avoid).
-        model: Optional model override (`--model`). Use "auto" to let Copilot pick.
-               Which ids work is ACCOUNT-DEPENDENT and copilot exposes no
-               non-interactive list, so the bridge cannot validate this the way the
-               agy/cursor tools do — an unavailable id errors immediately with
-               copilot's own message, costing a call. Prefer omitting it (your
-               account default) or "auto" unless you know your plan's ids.
-        timeout_s: Max seconds to wait for copilot to complete. Default 180.
-                   (Copilot's reasoning models can be slow; raise this if needed.)
-        watch: If true, open a live "watch" view streaming copilot's steps from its
-               `--output-format json` event stream. Same final text is returned.
-               Best-effort. Default false.
-    """
-    ws = copilot_bridge.normalize_workspace(workspace)
-    copilot_bridge.validate_sandbox(sandbox)  # fail fast with a clear message
-    if watch:
-        return await asyncio.to_thread(
-            _run_copilot_watched, prompt, ws, sandbox, model, False, timeout_s
-        )
-    return await _run_with_progress(
-        copilot_bridge.run_copilot,
-        (prompt, ws, sandbox, model, False, timeout_s),
-        ctx,
-        timeout_s,
-        label="copilot",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Continue GitHub Copilot session",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-async def copilot_continue(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = copilot_bridge.DEFAULT_SANDBOX,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Continue the Copilot session rooted at this workspace (resumes its `--session-id`).
-
-    Resumes the exact session id the bridge set on the last copilot_ask in this
-    workspace, falling back to the newest on-disk session whose recorded cwd
-    matches (so it still works after a server restart). Unlike codex_continue,
-    copilot re-applies permission flags on every call, so `sandbox` takes effect
-    here too — e.g. analyze read-only with copilot_ask, then continue with
-    "workspace-write" to apply the fix.
-
-    Args:
-        prompt: Follow-up message for the existing session.
-        workspace: Working root used by the prior session. Defaults to the server cwd.
-        sandbox: Permission policy for THIS turn (default "read-only"). Same values
-                 and caveats as copilot_ask.
-        timeout_s: Max seconds to wait for copilot to complete. Default 180.
-        watch: If true, open the live "watch" view streaming copilot's steps
-               (same viewer as copilot_ask). Default false.
-    """
-    ws = copilot_bridge.normalize_workspace(workspace)
-    copilot_bridge.validate_sandbox(sandbox)
-    if watch:
-        return await asyncio.to_thread(
-            _run_copilot_watched, prompt, ws, sandbox, None, True, timeout_s
-        )
-    return await _run_with_progress(
-        copilot_bridge.run_copilot,
-        (prompt, ws, sandbox, None, True, timeout_s),
-        ctx,
-        timeout_s,
-        label="copilot",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Copilot bridge diagnostics",
-        "readOnlyHint": True,  # only runs `copilot --version` + reads local state
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-def copilot_status() -> str:
-    """Report diagnostics for the Copilot bridge setup (spends no quota).
-
-    Reports the bridge's own version and whether a newer release is available
-    (best-effort GitHub check; honors AGY_BRIDGE_NO_UPDATE_CHECK) — the same
-    update notice antigravity_status shows, so a Copilot-only install still
-    surfaces it — then checks whether copilot is on PATH (and its version), an auth
-    hint (copilot has no `login status` command, so this is best-effort — an env
-    token is reported when set, otherwise login via the credential store is
-    assumed and unverified), where copilot stores session state, and how many
-    workspace sessions are pinned this run. Use this to debug "copilot not found"
-    or auth errors before a call.
-    """
-    rows = [_bridge_version_status()] + copilot_bridge.status_rows()
-    width = max(len(label) for label, _, _ in rows)
-    lines = ["copilot bridge status"]
-    for label, ok, detail in rows:
-        mark = "ok" if ok else "!!"
-        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
-    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
-    return "\n".join(lines)
-
-
-def _copilot_tool_arg(arguments) -> str:
-    """A short, human-readable representative argument for a copilot tool call.
-
-    copilot's tool `arguments` is a dict (e.g. {"path": ...} for view,
-    {"command": ...} for shell). Return the first informative field's first line.
-    """
-    if not isinstance(arguments, dict):
-        return ""
-    for key in ("command", "path", "file", "filePath", "query", "pattern", "url"):
-        v = arguments.get(key)
-        if isinstance(v, str) and v.strip():
-            return v.strip().splitlines()[0]
-    return ""
-
-
-def _copilot_event_to_watch_lines(ev: dict) -> list[tuple[str, str]]:
-    """Map one copilot --output-format json event to (kind, text) watch lines
-    (kind is 'narration' | 'command' | 'result'), mirroring
-    _codex_event_to_watch_lines. Returns [] for events not worth showing.
-    """
-    etype = ev.get("type")
-    data = ev.get("data") or {}
-    if etype == "assistant.message":
-        txt = (data.get("content") or "").strip()
-        return [("narration", txt.splitlines()[0][:200])] if txt else []
-    if etype == "assistant.turn_start":
-        return [("narration", "thinking…")]
-    if etype == "tool.execution_start":
-        name = data.get("toolName") or data.get("name") or "tool"
-        arg = _copilot_tool_arg(data.get("arguments"))
-        return [("command", f"{name} {arg}".strip()[:200])]
-    if etype == "tool.execution_complete":
-        return [("result", "done" if data.get("success") else "tool failed")]
-    if etype == "error":
-        msg = data.get("message") or ev.get("message") or ""
-        return [("result", f"error: {msg}"[:200])]
-    return []
-
-
-def _run_copilot_watched(
-    prompt: str,
-    workspace: str,
-    sandbox: str,
-    model: Optional[str],
-    continue_conv: bool,
-    timeout_s: int,
-) -> str:
-    """Like copilot_bridge.run_copilot, but stream copilot's steps to the live watch
-    window. EXPERIMENTAL. Reuses the same localhost viewer as the agy/codex watch
-    tools; the return value is identical to copilot_ask.
-    """
-    start = time.time()
-    title = prompt.strip().splitlines()[0] if prompt.strip() else ""
-    if len(title) > 200:
-        title = title[:200].rsplit(" ", 1)[0] + "…"
-    history = copilot_bridge.read_history(workspace, continue_conv)
-    rid = _watch_begin(title, start, timeout_s, backend="copilot", prompt=prompt, history=history)
-    try:
-        port = _ensure_watch_server()
-        _open_watch_window(_watch_url(port, rid), rid)
-    except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
-        pass
-
-    def on_event(ev: dict) -> None:
-        watch_lines = _copilot_event_to_watch_lines(ev)
-        if watch_lines:
-            t = round(time.time() - start, 1)
-            _watch_append(rid, [{"kind": k, "text": x, "t": t} for k, x in watch_lines])
-
-    try:
-        answer = copilot_bridge.run_copilot_streaming(
-            prompt, workspace, sandbox, model, continue_conv, timeout_s, on_event
-        )
-    except Exception as e:  # noqa: BLE001 — show the failure in the window, then re-raise
-        _watch_finish(rid, "error", f"({e})"[:200], time.time() - start)
-        raise
-    _watch_finish(rid, "done", answer, time.time() - start)
-    return answer
-
-
-# ============================================================ Cursor tools
-@mcp.tool(
-    annotations={
-        "title": "Ask Cursor (new chat)",
-        "readOnlyHint": False,  # cursor may edit files / run commands per sandbox
-        "idempotentHint": False,
-        "openWorldHint": True,  # talks to the external Cursor service
-    }
-)
-async def cursor_ask(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = cursor_bridge.DEFAULT_SANDBOX,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Ask the Cursor CLI (`cursor-agent -p`) a question or task in a NEW chat.
-
-    Uses your existing Cursor login (OS credential store, or a CURSOR_API_KEY env
-    var — see `cursor_status`). Returns the agent's final message, read straight
-    from stdout (no scraping). Cursor is a capable agentic coder with a wide model
-    menu (GPT / Claude / Grok / Composer); point `workspace` at a project dir for
-    context-aware answers.
-
-    Args:
-        prompt: Question or instruction for Cursor.
-        workspace: Working root for the chat (`--workspace`). Defaults to the server cwd.
-        sandbox: Permission policy (maps to cursor's mode/force flags):
-                 "read-only" (default — `--mode ask`: agent-enforced, no file/shell
-                 edits; NOT an OS sandbox, so unlike codex it is not a hard
-                 boundary), "workspace-write" (may edit files, rooted at the
-                 workspace), or "danger-full-access" (OS sandbox off — avoid).
-        model: Optional model override (`--model`, e.g. "auto", "gpt-5.2",
-               "claude-opus-4-8-high", "composer-2.5"); validated against
-               `cursor-agent models` and rejected on a typo. cursor bakes the effort
-               and speed axes into the id (…-low/-high/-xhigh/-max, each with a
-               -fast twin) and also accepts a bracket form on the family base, e.g.
-               "claude-opus-4-8[context=1m,effort=high]". Omit to use your Cursor
-               default.
-        timeout_s: Max seconds to wait for cursor to complete. Default 180.
-        watch: If true, open a live "watch" view streaming cursor's steps from its
-               `--output-format stream-json` event stream. Same final text is
-               returned. Best-effort. Default false.
-    """
-    ws = cursor_bridge.normalize_workspace(workspace)
-    cursor_bridge.validate_sandbox(sandbox)  # fail fast with a clear message
-    cursor_bridge.validate_model(model)  # fail fast on a typo (cursor models)
-    if watch:
-        return await asyncio.to_thread(
-            _run_cursor_watched, prompt, ws, sandbox, model, False, timeout_s
-        )
-    return await _run_with_progress(
-        cursor_bridge.run_cursor,
-        (prompt, ws, sandbox, model, False, timeout_s),
-        ctx,
-        timeout_s,
-        label="cursor",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Continue Cursor chat",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-async def cursor_continue(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = cursor_bridge.DEFAULT_SANDBOX,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Continue the Cursor chat rooted at this workspace (resumes its chat id).
-
-    Resumes the exact chat id the bridge minted on the last cursor_ask in this
-    workspace, falling back to the newest on-disk chat whose recorded cwd matches
-    (so it still works after a server restart). cursor applies permission flags per
-    invocation, so `sandbox` takes effect here too — e.g. analyze read-only with
-    cursor_ask, then continue with "workspace-write" to apply the fix.
-
-    Args:
-        prompt: Follow-up message for the existing chat.
-        workspace: Working root used by the prior chat. Defaults to the server cwd.
-        sandbox: Permission policy for THIS turn (default "read-only"). Same values
-                 and caveats as cursor_ask.
-        timeout_s: Max seconds to wait for cursor to complete. Default 180.
-        watch: If true, open the live "watch" view streaming cursor's steps
-               (same viewer as cursor_ask). Default false.
-    """
-    ws = cursor_bridge.normalize_workspace(workspace)
-    cursor_bridge.validate_sandbox(sandbox)
-    if watch:
-        return await asyncio.to_thread(
-            _run_cursor_watched, prompt, ws, sandbox, None, True, timeout_s
-        )
-    return await _run_with_progress(
-        cursor_bridge.run_cursor,
-        (prompt, ws, sandbox, None, True, timeout_s),
-        ctx,
-        timeout_s,
-        label="cursor",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Cursor bridge diagnostics",
-        "readOnlyHint": True,  # only runs `cursor-agent --version`/`status` + reads local state
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-def cursor_status() -> str:
-    """Report diagnostics for the Cursor bridge setup (spends no quota).
-
-    Reports the bridge's own version and whether a newer release is available
-    (best-effort GitHub check; honors AGY_BRIDGE_NO_UPDATE_CHECK) — the same
-    update notice antigravity_status shows, so a Cursor-only install still surfaces
-    it — then checks whether cursor-agent is found (and its version), whether
-    you're logged in (`cursor-agent status`), and where cursor stores its chats.
-    Use this to debug "cursor not found" or auth errors before spending quota.
-    """
-    rows = [_bridge_version_status()] + cursor_bridge.status_rows()
-    width = max(len(label) for label, _, _ in rows)
-    lines = ["cursor bridge status"]
-    for label, ok, detail in rows:
-        mark = "ok" if ok else "!!"
-        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
-    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
-    return "\n".join(lines)
-
-
-def _cursor_tool_line(tc: dict) -> str:
-    """A short, human-readable line for a cursor tool_call.
-
-    cursor's `tool_call` payload has one `<name>ToolCall` key (e.g. shellToolCall,
-    readToolCall) holding `args` + a `description`. Prefer a command/path-like
-    arg, then the description, then the tool's name.
-    """
-    if not isinstance(tc, dict):
-        return ""
-    for key, val in tc.items():
-        if not key.endswith("ToolCall") or not isinstance(val, dict):
-            continue
-        args = val.get("args") or {}
-        if isinstance(args, dict):
-            for f in ("command", "path", "file", "filePath", "query", "pattern", "url"):
-                v = args.get(f)
-                if isinstance(v, str) and v.strip():
-                    return v.strip().splitlines()[0]
-        desc = val.get("description")
-        if isinstance(desc, str) and desc.strip():
-            return desc.strip().splitlines()[0]
-        return key[: -len("ToolCall")]  # e.g. "shell", "read"
-    return ""
-
-
-def _cursor_event_to_watch_lines(ev: dict) -> list[tuple[str, str]]:
-    """Map one cursor stream-json event to (kind, text) watch lines
-    (kind is 'narration' | 'command' | 'result'), mirroring
-    _copilot_event_to_watch_lines. Returns [] for events not worth showing.
-    """
-    etype = ev.get("type")
-    if etype == "assistant":
-        content = (ev.get("message") or {}).get("content") or []
-        txt = "".join(
-            p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"
-        ).strip()
-        return [("narration", txt.splitlines()[0][:200])] if txt else []
-    if etype == "tool_call":
-        sub = ev.get("subtype")
-        if sub == "started":
-            line = _cursor_tool_line(ev.get("tool_call") or {})
-            return [("command", line[:200])] if line else []
-        if sub == "completed":
-            return [("result", "done")]
-        return []
-    if etype == "error":
-        msg = ev.get("message") or (ev.get("error") or {}).get("message") or ""
-        return [("result", f"error: {msg}"[:200])]
-    if etype == "result" and ev.get("is_error"):
-        return [("result", "error")]
-    return []
-
-
-def _run_cursor_watched(
-    prompt: str,
-    workspace: str,
-    sandbox: str,
-    model: Optional[str],
-    continue_conv: bool,
-    timeout_s: int,
-) -> str:
-    """Like cursor_bridge.run_cursor, but stream cursor's steps to the live watch
-    window. EXPERIMENTAL. Reuses the same localhost viewer as the agy/codex/copilot
-    watch tools; the return value is identical to cursor_ask.
-    """
-    start = time.time()
-    title = prompt.strip().splitlines()[0] if prompt.strip() else ""
-    if len(title) > 200:
-        title = title[:200].rsplit(" ", 1)[0] + "…"
-    history = cursor_bridge.read_history(workspace, continue_conv)
-    rid = _watch_begin(title, start, timeout_s, backend="cursor", prompt=prompt, history=history)
-    try:
-        port = _ensure_watch_server()
-        _open_watch_window(_watch_url(port, rid), rid)
-    except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
-        pass
-
-    def on_event(ev: dict) -> None:
-        watch_lines = _cursor_event_to_watch_lines(ev)
-        if watch_lines:
-            t = round(time.time() - start, 1)
-            _watch_append(rid, [{"kind": k, "text": x, "t": t} for k, x in watch_lines])
-
-    try:
-        answer = cursor_bridge.run_cursor_streaming(
-            prompt, workspace, sandbox, model, continue_conv, timeout_s, on_event
-        )
-    except Exception as e:  # noqa: BLE001 — show the failure in the window, then re-raise
-        _watch_finish(rid, "error", f"({e})"[:200], time.time() - start)
-        raise
-    _watch_finish(rid, "done", answer, time.time() - start)
-    return answer
-
-
-# ============================================================ Grok tools
-# EXPERIMENTAL — see grok_bridge's module docstring. The flag surface below is
-# live-verified on grok 1.0.3; the ANSWER path behind grok's auth wall is not.
-@mcp.tool(
-    annotations={
-        "title": "Ask Grok Build (new session) [experimental]",
-        "readOnlyHint": False,  # grok may edit files / run commands per sandbox
-        "idempotentHint": False,
-        "openWorldHint": True,  # talks to the external xAI service
-    }
-)
-async def grok_ask(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = grok_bridge.DEFAULT_SANDBOX,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Ask Grok Build (`grok -p`) a question or task in a NEW session. EXPERIMENTAL.
-
-    ⚠️ Community-verified only: this bridge has never completed an authenticated
-    round-trip, because the author has no Grok subscription. Its flags are verified
-    against grok 1.0.3, but the answer path is not. If it misbehaves, say so rather
-    than working around it — and please report it.
-
-    Needs a SuperGrok / X Premium+ login (`grok login`) or an XAI_API_KEY env var;
-    run `grok_status` first to check. Returns the agent's final message, read from
-    grok's `--output-format json` result. Point `workspace` at a project dir for
-    context-aware answers.
-
-    Args:
-        prompt: Question or instruction for Grok.
-        workspace: Working root (`--cwd`). Defaults to the server cwd.
-        sandbox: Permission policy (maps to grok's `--sandbox` profile plus a tool
-                 allowlist): "read-only" (default — the `read-only` profile, no
-                 write/shell tools, no subagents), "workspace-write" (the
-                 `workspace` profile: writes land in the workspace, ~/.grok and
-                 temp), or "danger-full-access" (profile `off` — avoid).
-                 ⚠️ grok's OS sandbox is LINUX/macOS ONLY (Landlock/Seatbelt); on
-                 Windows it is silently NOT enforced, so read-only there rests on
-                 the agent-enforced tool allowlist alone. For a hard boundary on
-                 every platform, use codex.
-        model: Optional model override (`-m`, e.g. "grok-4.5"); validated against
-               `grok models` and rejected on a typo. Omit to use grok's default.
-        timeout_s: Max seconds to wait for grok to complete. Default 180.
-        watch: If true, open a live "watch" view streaming grok's steps from its
-               `--output-format streaming-json` event stream. Same final text is
-               returned. Best-effort. Default false.
-    """
-    ws = grok_bridge.normalize_workspace(workspace)
-    grok_bridge.validate_sandbox(sandbox)  # fail fast (grok checks auth first)
-    grok_bridge.validate_model(model)  # fail fast on a typo (grok models)
-    if watch:
-        return await asyncio.to_thread(
-            _run_grok_watched, prompt, ws, sandbox, model, False, timeout_s
-        )
-    return await _run_with_progress(
-        grok_bridge.run_grok,
-        (prompt, ws, sandbox, model, False, timeout_s),
-        ctx,
-        timeout_s,
-        label="grok",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Continue Grok Build session [experimental]",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-async def grok_continue(
-    prompt: str,
-    workspace: Optional[str] = None,
-    sandbox: str = grok_bridge.DEFAULT_SANDBOX,
-    timeout_s: int = 180,
-    watch: bool = False,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Continue the Grok session rooted at this workspace. EXPERIMENTAL.
-
-    Resumes the exact session id grok returned on the last grok_ask in this
-    workspace (`-r <id>`), falling back to grok's own "most recent session for this
-    cwd" (`-c`) when that in-memory pin is gone — so it still works after a server
-    restart. grok applies permission flags per invocation, so `sandbox` takes effect
-    here too: analyze read-only with grok_ask, then continue with "workspace-write"
-    to apply the fix. Same experimental caveat and auth requirement as grok_ask.
-
-    Args:
-        prompt: Follow-up message for the existing session.
-        workspace: Working root used by the prior session. Defaults to the server cwd.
-        sandbox: Permission policy for THIS turn (default "read-only"). Same values
-                 and platform caveats as grok_ask.
-        timeout_s: Max seconds to wait for grok to complete. Default 180.
-        watch: If true, open the live "watch" view streaming grok's steps
-               (same viewer as grok_ask). Default false.
-    """
-    ws = grok_bridge.normalize_workspace(workspace)
-    grok_bridge.validate_sandbox(sandbox)
-    if watch:
-        return await asyncio.to_thread(
-            _run_grok_watched, prompt, ws, sandbox, None, True, timeout_s
-        )
-    return await _run_with_progress(
-        grok_bridge.run_grok,
-        (prompt, ws, sandbox, None, True, timeout_s),
-        ctx,
-        timeout_s,
-        label="grok",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Grok bridge diagnostics",
-        "readOnlyHint": True,  # only runs `grok --version`/`models` + reads local state
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-def grok_status() -> str:
-    """Report diagnostics for the Grok Build bridge setup (spends no quota).
-
-    Reports the bridge's own version and any newer release (the same update notice
-    antigravity_status shows), then whether `grok` is found (and its version),
-    whether you're authenticated, which models it offers, and where grok keeps its
-    data. Auth and the model list both come from `grok models`, which answers even
-    when logged out — so this is cheap and safe to call first.
-
-    Use this to debug "grok not found" or auth errors before spending quota. This
-    backend is EXPERIMENTAL and unverified end-to-end, so a green status here means
-    the setup looks right, not that a live answer has ever been confirmed.
-    """
-    rows = [_bridge_version_status()] + grok_bridge.status_rows()
-    width = max(len(label) for label, _, _ in rows)
-    lines = ["grok bridge status  (EXPERIMENTAL — community-verified only)"]
-    for label, ok, detail in rows:
-        mark = "ok" if ok else "!!"
-        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
-    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
-    return "\n".join(lines)
-
-
-def _grok_tool_line(ev: dict) -> str:
-    """A short, human-readable line for a grok `tool_call` event.
-
-    grok's ACP-derived tool_call carries `toolName` plus a `rawInput` object and a
-    human `title`. Prefer a command/path-like input field, then the title, then the
-    tool name.
-    """
-    raw = ev.get("rawInput")
-    if isinstance(raw, dict):
-        for f in ("command", "path", "file_path", "pattern", "query", "url", "target_file"):
-            v = raw.get(f)
-            if isinstance(v, str) and v.strip():
-                return v.strip().splitlines()[0]
-    for f in ("title", "toolName"):
-        v = ev.get(f)
-        if isinstance(v, str) and v.strip():
-            return v.strip().splitlines()[0]
-    return ""
-
-
-def _grok_event_to_watch_lines(ev: dict) -> list[tuple[str, str]]:
-    """Map one grok streaming-json event to (kind, text) watch lines
-    (kind is 'narration' | 'command' | 'result'), mirroring
-    _cursor_event_to_watch_lines. Returns [] for events not worth showing.
-    """
-    etype = ev.get("type")
-    if etype in ("text", "thought"):
-        data = ev.get("data")
-        if isinstance(data, str) and data.strip():
-            return [("narration", data.strip().splitlines()[0][:200])]
-        return []
-    if etype == "tool_call":
-        line = _grok_tool_line(ev)
-        return [("command", line[:200])] if line else []
-    if etype == "tool_call_update":
-        if ev.get("status") == "completed":
-            return [("result", "done")]
-        if ev.get("status") == "failed":
-            return [("result", "failed")]
-        return []
-    if etype == "error":
-        return [("result", f"error: {ev.get('message') or ''}"[:200])]
-    return []
-
-
-def _run_grok_watched(
-    prompt: str,
-    workspace: str,
-    sandbox: str,
-    model: Optional[str],
-    continue_conv: bool,
-    timeout_s: int,
-) -> str:
-    """Like grok_bridge.run_grok, but stream grok's steps to the live watch window.
-
-    EXPERIMENTAL twice over: the watch viewer is best-effort, and grok's
-    streaming-json event shapes are docs-derived (never observed on a real answer).
-    Unknown events simply render nothing. Return value is identical to grok_ask.
-    """
-    start = time.time()
-    title = prompt.strip().splitlines()[0] if prompt.strip() else ""
-    if len(title) > 200:
-        title = title[:200].rsplit(" ", 1)[0] + "…"
-    history = grok_bridge.read_history(workspace, continue_conv)
-    rid = _watch_begin(title, start, timeout_s, backend="grok", prompt=prompt, history=history)
-    try:
-        port = _ensure_watch_server()
-        _open_watch_window(_watch_url(port, rid), rid)
-    except Exception:  # noqa: BLE001 — the viewer is best-effort, never fatal
-        pass
-
-    def on_event(ev: dict) -> None:
-        watch_lines = _grok_event_to_watch_lines(ev)
-        if watch_lines:
-            t = round(time.time() - start, 1)
-            _watch_append(rid, [{"kind": k, "text": x, "t": t} for k, x in watch_lines])
-
-    try:
-        answer = grok_bridge.run_grok_streaming(
-            prompt, workspace, sandbox, model, continue_conv, timeout_s, on_event
-        )
-    except Exception as e:  # noqa: BLE001 — show the failure in the window, then re-raise
-        _watch_finish(rid, "error", f"({e})"[:200], time.time() - start)
-        raise
-    _watch_finish(rid, "done", answer, time.time() - start)
-    return answer
-
-
-# ============================================================ Kimi tools
-# EXPERIMENTAL — see kimi_bridge's module docstring. Verified only as far as an
-# unauthenticated kimi 0.29.1 allows; deliberately no swarm/watch support until a
-# live round-trip confirms kimi's stream-json envelope.
-@mcp.tool(
-    annotations={
-        "title": "Ask Kimi (new session) [experimental]",
-        "readOnlyHint": False,  # kimi print mode auto-executes tools (no sandbox)
-        "idempotentHint": False,
-        "openWorldHint": True,  # talks to the external Moonshot/Kimi service
-    }
-)
-async def kimi_ask(
-    prompt: str,
-    workspace: Optional[str] = None,
-    model: Optional[str] = None,
-    timeout_s: int = 180,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Ask Kimi Code (`kimi -p`) a question or task in a NEW session. EXPERIMENTAL.
-
-    ⚠️ Community-verified only — built without a Kimi account, so no authenticated
-    round-trip has ever run and the author cannot verify it. It won't answer until
-    you authenticate: run `kimi login` (device-code) or put an API key in
-    ~/.kimi-code/config.toml, then check `kimi_status`. Returns the agent's final
-    message, read straight from stdout. Kimi Code is Moonshot's terminal coding
-    agent (Kimi K2 family); point `workspace` at a project dir for context-aware
-    answers.
-
-    Kimi print mode has NO sandbox and auto-executes every tool call (like
-    antigravity), so run it only with trusted prompts on trusted content.
-
-    Args:
-        prompt: Question or instruction for Kimi.
-        workspace: Working root (kimi's cwd). Defaults to the server cwd.
-        model: Optional model alias (`-m`, from ~/.kimi-code/config.toml); omit to
-               use config's default_model. Not validated up front (Kimi has no
-               `models` list), so a bad alias surfaces as Kimi's own run-time error.
-        timeout_s: Max seconds to wait for kimi to complete. Default 180.
-    """
-    ws = kimi_bridge.normalize_workspace(workspace)
-    model = kimi_bridge.validate_model(model)
-    return await _run_with_progress(
-        kimi_bridge.run_kimi,
-        (prompt, ws, model, False, timeout_s),
-        ctx,
-        timeout_s,
-        label="kimi",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Continue Kimi session [experimental]",
-        "readOnlyHint": False,
-        "idempotentHint": False,
-        "openWorldHint": True,
-    }
-)
-async def kimi_continue(
-    prompt: str,
-    workspace: Optional[str] = None,
-    timeout_s: int = 180,
-    ctx: Optional[Context] = None,
-) -> str:
-    """Continue the Kimi session rooted at this workspace (`kimi -c`). EXPERIMENTAL.
-
-    Resumes the previous Kimi session for this workspace via `-c/--continue` — Kimi
-    scopes sessions per working directory, so there's no id to track. Errors if no
-    prior kimi_ask ran in this workspace. Same experimental caveat and auth
-    requirement as kimi_ask.
-
-    Args:
-        prompt: Follow-up message for the existing session.
-        workspace: Working root used by the prior session. Defaults to the server cwd.
-        timeout_s: Max seconds to wait for kimi to complete. Default 180.
-    """
-    ws = kimi_bridge.normalize_workspace(workspace)
-    return await _run_with_progress(
-        kimi_bridge.run_kimi,
-        (prompt, ws, None, True, timeout_s),
-        ctx,
-        timeout_s,
-        label="kimi",
-    )
-
-
-@mcp.tool(
-    annotations={
-        "title": "Kimi bridge diagnostics",
-        "readOnlyHint": True,  # only runs `kimi --version`/`provider list` + reads local state
-        "idempotentHint": True,
-        "openWorldHint": False,
-    }
-)
-def kimi_status() -> str:
-    """Report diagnostics for the Kimi bridge setup (spends no quota). EXPERIMENTAL.
-
-    Reports the bridge's own version and any newer release (same update notice
-    antigravity_status shows), then checks whether `kimi` is found (and its
-    version), whether a provider is configured (`kimi provider list` — the auth
-    proxy, since Kimi needs `kimi login` or an API key in config.toml), and where
-    Kimi stores its data. This backend is unverified, so expect the auth row to say
-    "no providers configured" until you log in.
-    """
-    rows = [_bridge_version_status()] + kimi_bridge.status_rows()
-    width = max(len(label) for label, _, _ in rows)
-    lines = ["kimi bridge status  (EXPERIMENTAL — community-verified only)"]
-    for label, ok, detail in rows:
-        mark = "ok" if ok else "!!"
-        lines.append(f"  {label.ljust(width)}  [{mark}] {detail}")
-    lines.append("Overall: " + ("OK" if all(ok for _, ok, _ in rows) else "PROBLEMS FOUND"))
-    return "\n".join(lines)
-
-
-def main() -> None:
+def main(argv: Optional[list[str]] = None) -> None:
     """Console entry point (also `python server.py`).
 
     Exposed as the `agent-intern` script so the bridge can be launched with
     `uvx agent-intern` (isolated, always-latest) instead of a hardcoded path.
+
+    `agent-intern --version` and `agent-intern doctor` are terminal commands; they
+    print to stdout and exit. Only they write there: the server path below never
+    does, since stdout is its JSON-RPC channel.
     """
+    args = sys.argv[1:] if argv is None else argv
+    if args and args[0] in _VERSION_FLAGS:
+        print(f"agent-intern {__version__}")
+        return
+    if args and args[0] in _CLI_COMMANDS:
+        import doctor  # only the terminal commands pay for it
+
+        sys.exit(doctor.cli(args))
     _configure_logging()
     _startup_checks()
     mcp.run()
