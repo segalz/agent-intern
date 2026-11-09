@@ -295,12 +295,6 @@ def build_args(
     prompt — the subprocess cwd is still set to the workspace by the caller.
     `json_stream` adds `--json` so codex emits its events as JSONL on stdout (for
     watch mode); the final answer is still read from `output_file` either way.
-
-    The prompt is NOT put on argv: argv ends with `-`, and the caller writes the
-    prompt to codex's stdin. On Windows codex is usually the npm `codex.cmd` shim,
-    which runs through cmd.exe, and cmd.exe cuts an argument at its first newline,
-    so a multi-line prompt passed on argv silently reached codex as its first line
-    only. `prompt` stays in the signature so callers keep one call shape.
     """
     args = [CODEX_BIN, "exec"]
     if resume_session:
@@ -308,13 +302,10 @@ def build_args(
     if model:
         args += ["-m", model]
     if not resume_session:
-        args += ["-s", sandbox, "-C", workspace]
-    # resume needs it too: without it a resume in an untrusted non-git workspace
-    # fails with "Not inside a trusted directory".
-    args += ["--skip-git-repo-check"]
+        args += ["-s", sandbox, "-C", workspace, "--skip-git-repo-check"]
     if json_stream:
         args += ["--json"]
-    args += ["-o", output_file, "-"]
+    args += ["-o", output_file, prompt]
     return args
 
 
@@ -362,7 +353,7 @@ def run_codex(
         proc = subprocess.run(
             args,
             cwd=workspace,
-            input=prompt,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             **_TEXT,
             timeout=timeout_s + 30,
@@ -430,20 +421,12 @@ def run_codex_streaming(
         proc = subprocess.Popen(
             args,
             cwd=workspace,
-            stdin=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             **_TEXT,
             **_spawn_kwargs(),
         )
-        # The prompt goes in on stdin (see build_args), then stdin is closed so
-        # codex sees EOF and starts the turn.
-        if proc.stdin is not None:
-            try:
-                proc.stdin.write(prompt)
-                proc.stdin.close()
-            except OSError:
-                pass
         # Drive completion off PROCESS EXIT, not stdout EOF: codex (node) can leave a
         # child process holding the stdout pipe open after the turn is done, so a plain
         # `for line in proc.stdout` would block forever even though codex has finished

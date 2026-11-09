@@ -3327,7 +3327,6 @@ async def codex_ask(
 async def codex_continue(
     prompt: str,
     workspace: Optional[str] = None,
-    model: Optional[str] = None,
     timeout_s: int = 180,
     watch: bool = False,
     ctx: Optional[Context] = None,
@@ -3337,14 +3336,12 @@ async def codex_continue(
     Resumes the exact session id captured from the last codex_ask in this
     workspace, falling back to the newest on-disk session whose recorded cwd
     matches (so it still works after a server restart). The resumed session keeps
-    its original sandbox. It does NOT keep its model: codex resumes on the model
-    configured in config.toml, so if the session was started with a `model`
-    override, pass the same `model` here.
+    its original sandbox and model — those are chosen when you start it with
+    codex_ask.
 
     Args:
         prompt: Follow-up message for the existing session.
         workspace: Working root used by the prior session. Defaults to the server cwd.
-        model: Optional model override (`-m`); pass the one the session started with.
         timeout_s: Max seconds to wait for codex to complete. Default 180.
         watch: If true, open the live "watch" view streaming codex's steps as it
                works (same viewer as codex_ask). Default false.
@@ -3356,13 +3353,13 @@ async def codex_continue(
             prompt,
             ws,
             codex_bridge.DEFAULT_SANDBOX,
-            model,
+            None,
             True,
             timeout_s,
         )
     return await _run_with_progress(
         codex_bridge.run_codex,
-        (prompt, ws, codex_bridge.DEFAULT_SANDBOX, model, True, timeout_s),
+        (prompt, ws, codex_bridge.DEFAULT_SANDBOX, None, True, timeout_s),
         ctx,
         timeout_s,
         label="codex",
