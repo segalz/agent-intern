@@ -81,8 +81,9 @@ turned on and says what to fix. It spends no quota, and needs no host. Any `*_st
 *"run antigravity_status"*) checks one backend from inside the session.
 
 > [!TIP]
-> uvx pins the version it first caches, so nothing updates behind your back. Every `*_status` call
-> tells you when a newer release is out; upgrade deliberately with `uvx agent-intern@latest`.
+> A plain `uvx agent-intern` picks up a new release the next time your host starts the server. To decide
+> when updates land, pin it: `uvx agent-intern==X.Y.Z`. Every `*_status` call tells you when a newer
+> release is out, and **Watch → Custom → Releases** on GitHub emails you when one ships.
 > [Other install paths, from source included →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/setup.md)
 
 <div align="center">
@@ -335,7 +336,7 @@ rest stay out of Claude's context. [How →](https://github.com/SinanTufekci/age
 [Tool reference →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/tools.md) ·
 [How each backend is driven →](https://github.com/SinanTufekci/agent-intern/blob/main/docs/backends.md)
 
-Verified live against **agy 1.5.3 · codex-cli 0.162.1 · copilot 1.0.105 · cursor-agent 2026.11.05 ·
+Verified live against **agy 1.5.8 · codex-cli 0.162.1 · copilot 1.0.105 · cursor-agent 2026.11.05 ·
 opencode 2.2.5** (1.x also supported) **· claude 2.1.319**. These CLIs update themselves, so
 [status & caveats](https://github.com/SinanTufekci/agent-intern/blob/main/docs/status.md) tracks what
 changed upstream and what the bridge does about it.

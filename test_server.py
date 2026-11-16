@@ -413,7 +413,7 @@ def test_update_warning_none_when_current_unparseable(monkeypatch):
 
 
 # --------------------------------------------------------------------------
-# _fetch_latest_release_version  (GitHub tags API; never raises on the network)
+# _fetch_latest_release_version  (PyPI by default; never raises on the network)
 # --------------------------------------------------------------------------
 
 
@@ -433,10 +433,22 @@ class _FakeResp:
         return False
 
 
-def test_fetch_latest_release_version_picks_highest(monkeypatch):
-    body = '[{"name": "v0.5.0"}, {"name": "v0.8.0"}, {"name": "v0.7.1"}, {"name": "nightly"}]'
-    monkeypatch.setattr(server.urllib.request, "urlopen", lambda *a, **k: _FakeResp(body))
+def _serve(monkeypatch, body: str):
+    """Make urlopen answer `body`; returns the list of URLs it was asked for."""
+    asked: list[str] = []
+
+    def _urlopen(req, *a, **k):
+        asked.append(req.full_url)
+        return _FakeResp(body)
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", _urlopen)
+    return asked
+
+
+def test_fetch_latest_release_version_reads_pypi(monkeypatch):
+    asked = _serve(monkeypatch, '{"info": {"version": "0.8.0"}, "releases": {}}')
     assert server._fetch_latest_release_version() == (0, 8, 0)
+    assert asked == [server.PYPI_JSON_URL]
 
 
 def test_fetch_latest_release_version_none_on_network_error(monkeypatch):
@@ -447,19 +459,101 @@ def test_fetch_latest_release_version_none_on_network_error(monkeypatch):
     assert server._fetch_latest_release_version() is None
 
 
-def test_fetch_latest_release_version_none_on_non_list(monkeypatch):
-    # rate-limit / error bodies come back as a JSON object, not a list of tags
-    monkeypatch.setattr(
-        server.urllib.request, "urlopen", lambda *a, **k: _FakeResp('{"message": "rate limited"}')
-    )
+@pytest.mark.parametrize(
+    "body",
+    [
+        "[]",  # not an object
+        '{"message": "boom"}',  # no info
+        '{"info": {"version": null}}',
+        '{"info": {"version": "nightly"}}',  # not a version
+        "not json at all",
+    ],
+)
+def test_fetch_latest_release_version_none_on_unusable_pypi_body(monkeypatch, body):
+    _serve(monkeypatch, body)
     assert server._fetch_latest_release_version() is None
 
 
-def test_fetch_latest_release_version_none_when_no_semver_tags(monkeypatch):
-    monkeypatch.setattr(
-        server.urllib.request, "urlopen", lambda *a, **k: _FakeResp('[{"name": "latest"}]')
-    )
+def test_fork_repo_reads_that_repos_github_tags(monkeypatch):
+    # A fork that is not on PyPI points AGY_BRIDGE_REPO at its own repo.
+    monkeypatch.setattr(server, "_FORK_REPO", "someone/agent-intern")
+    monkeypatch.setattr(server, "GITHUB_REPO", "someone/agent-intern")
+    body = '[{"name": "v0.5.0"}, {"name": "v0.8.0"}, {"name": "v0.7.1"}, {"name": "nightly"}]'
+    asked = _serve(monkeypatch, body)
+    assert server._fetch_latest_release_version() == (0, 8, 0)
+    assert asked == ["https://api.github.com/repos/someone/agent-intern/tags?per_page=100"]
+
+
+def test_fork_repo_none_on_non_list_or_no_semver_tags(monkeypatch):
+    monkeypatch.setattr(server, "_FORK_REPO", "someone/agent-intern")
+    _serve(monkeypatch, '{"message": "rate limited"}')
     assert server._fetch_latest_release_version() is None
+    server._latest_cache = None
+    _serve(monkeypatch, '[{"name": "latest"}]')
+    assert server._fetch_latest_release_version() is None
+
+
+def test_release_lookup_is_remembered_between_calls(monkeypatch):
+    asked = _serve(monkeypatch, '{"info": {"version": "0.8.0"}}')
+    for _ in range(5):
+        assert server._fetch_latest_release_version() == (0, 8, 0)
+    assert len(asked) == 1
+
+
+def test_release_lookup_asks_again_after_the_ttl(monkeypatch):
+    asked = _serve(monkeypatch, '{"info": {"version": "0.8.0"}}')
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    server._fetch_latest_release_version()
+    clock[0] += server._LATEST_TTL_S - 1
+    server._fetch_latest_release_version()
+    assert len(asked) == 1
+    clock[0] += 2
+    server._fetch_latest_release_version()
+    assert len(asked) == 2
+
+
+def test_a_failed_lookup_is_remembered_only_briefly(monkeypatch):
+    calls: list[int] = []
+
+    def _raise(*_a, **_k):
+        calls.append(1)
+        raise server.urllib.error.URLError("offline")
+
+    monkeypatch.setattr(server.urllib.request, "urlopen", _raise)
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, "monotonic", lambda: clock[0])
+    assert server._fetch_latest_release_version() is None
+    assert server._fetch_latest_release_version() is None
+    assert len(calls) == 1  # offline: not retried on every *_status call
+    clock[0] += server._LATEST_MISS_TTL_S + 1
+    assert server._fetch_latest_release_version() is None
+    assert len(calls) == 2  # but retried once the miss has aged
+
+
+def test_update_notices_link_the_release_notes(monkeypatch):
+    monkeypatch.setattr(server, "__version__", "0.8.0")
+    monkeypatch.setattr(server, "_fetch_latest_release_version", lambda: (0, 9, 0))
+    monkeypatch.setattr(server, "GITHUB_REPO", "SinanTufekci/agent-intern")
+    monkeypatch.delenv("AGENT_INTERN_NO_UPDATE_CHECK", raising=False)
+    url = "https://github.com/SinanTufekci/agent-intern/releases/tag/v0.9.0"
+    assert url in server._update_warning((0, 9, 0))
+    assert url in server._bridge_version_status()[2]
+
+
+@pytest.mark.parametrize("name", ["AGENT_INTERN_NO_UPDATE_CHECK", "AGY_BRIDGE_NO_UPDATE_CHECK"])
+def test_update_check_is_off_under_either_variable_name(monkeypatch, name):
+    # AGY_BRIDGE_NO_UPDATE_CHECK is the old name and must keep working.
+    monkeypatch.setenv(name, "1")
+    asked = _serve(monkeypatch, '{"info": {"version": "9.9.9"}}')
+    _, ok, detail = server._bridge_version_status()
+    assert ok is True and "disabled" in detail
+    assert asked == []
+
+
+def test_the_update_check_names_the_current_opt_out_variable(monkeypatch):
+    monkeypatch.setattr(server, "__version__", "0.8.0")
+    assert "AGENT_INTERN_NO_UPDATE_CHECK" in server._update_warning((0, 9, 0))
 
 
 # --------------------------------------------------------------------------
@@ -1206,6 +1300,8 @@ def test_validate_model_skips_when_list_unavailable(monkeypatch):
 # A fourth, on 1.4.12: the gemini-4-argon family, which agy's own default moved onto.
 DOCUMENTED_AGY_MODELS = [
     "gemini-4-argon-high",  # agy's own default family as of 1.4.12 (Medium, in a clean HOME)
+    "gemini-4-hydrogen-high",  # added by 1.5.8 (low|medium|high|xhigh); answers on an AI Pro login
+    "gemini-pro-orchestrator-g1-pro",  # added by 1.5.8, "Orchestrator (Argon)"; not called
     "gemini-3.8-flash-high",  # the default from 1.1.25 to 1.3.5 (added the 3.8 family)
     "claude-sonnet-5-5-high",
     "claude-opus-5-5-high",
@@ -1220,7 +1316,7 @@ def _model_family(slug: str) -> str:
     to three entries. The docs deliberately name only the -high variant of each,
     which is why the coverage test below compares families rather than slugs.
     """
-    for effort in ("-low", "-medium", "-high"):
+    for effort in ("-low", "-medium", "-high", "-xhigh"):
         if slug.endswith(effort):
             return slug[: -len(effort)]
     return slug
@@ -4074,11 +4170,20 @@ _TOOL_SURFACE = {
         ["prompts"],
     ),
     "antigravity_status": ([], []),
-    "claude_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
-    "claude_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
+    "claude_ask": (
+        ["prompt", "workspace", "sandbox", "model", "timeout_s", "watch", "effort"],
+        ["prompt"],
+    ),
+    "claude_continue": (
+        ["prompt", "workspace", "sandbox", "timeout_s", "watch", "effort"],
+        ["prompt"],
+    ),
     "claude_status": ([], []),
-    "codex_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
-    "codex_continue": (["prompt", "workspace", "timeout_s", "watch"], ["prompt"]),
+    "codex_ask": (
+        ["prompt", "workspace", "sandbox", "model", "timeout_s", "watch", "effort"],
+        ["prompt"],
+    ),
+    "codex_continue": (["prompt", "workspace", "timeout_s", "watch", "effort"], ["prompt"]),
     "codex_status": ([], []),
     "copilot_ask": (["prompt", "workspace", "sandbox", "model", "timeout_s", "watch"], ["prompt"]),
     "copilot_continue": (["prompt", "workspace", "sandbox", "timeout_s", "watch"], ["prompt"]),
@@ -4472,3 +4577,22 @@ def test_rules_in_a_real_process_honours_agent_intern_backends():
     assert proc.returncode == 0, proc.stderr.decode("utf-8", "replace")[-300:]
     assert proc.stdout == (server._server_instructions(("codex",)) + "\n").encode("utf-8")
     assert b"antigravity" not in proc.stdout
+
+
+def test_watch_state_carries_the_model_shown_next_to_the_backend():
+    rid = server._watch_begin("t", 1.0, backend="codex", model="gpt-5.5")
+    assert server._watch_snapshot(rid)["model"] == "gpt-5.5"
+    server._watch_finish(rid, "done", "a", 1.0)
+    rid2 = server._watch_begin("t2", 2.0)  # no model given: empty, not a guess
+    assert server._watch_snapshot(rid2)["model"] == ""
+    assert server._WATCH_IDLE["model"] == ""
+
+
+def test_the_watch_header_shows_the_model_as_a_chip_beside_the_backend_name():
+    import watch_ui
+
+    assert "setAgent(s.backend,null,s.model)" in server._WATCH_HTML
+    # the backend name and the model are separate elements: the model is a chip
+    assert '$("bkname").textContent=NAMES[AGENT]||AGENT;' in watch_ui.JS
+    assert 'const m=$("mdl");m.hidden=!model;' in watch_ui.JS
+    assert 'id="mdl"' in watch_ui.BODY and ".mdl{" in watch_ui.BASE_CSS

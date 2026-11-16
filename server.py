@@ -695,7 +695,7 @@ SERVER_INSTRUCTIONS = _server_instructions(ENABLED_BACKENDS)
 # installed package metadata, which goes stale on editable installs). Keep in
 # sync with pyproject.toml's version. Compared at startup against the latest
 # tag on GitHub so a long-lived clone learns when to `git pull`.
-__version__ = "0.36.0"
+__version__ = "0.38.0"
 
 # Passed explicitly: without it the MCP handshake's serverInfo.version reports
 # fastmcp's own version, not the bridge's.
@@ -712,9 +712,14 @@ log = logging.getLogger("agy_bridge")
 # Read once at import; the launching process's environment wins.
 AGY_BIN = os.environ.get("AGY_BIN", "agy")
 
-# GitHub repo polled at startup for a newer release tag. Override AGY_BRIDGE_REPO
-# if you run a fork; set AGY_BRIDGE_NO_UPDATE_CHECK=1 to skip the check entirely.
-GITHUB_REPO = os.environ.get("AGY_BRIDGE_REPO", "SinanTufekci/agent-intern")
+# The update check asks PyPI which release is newest: that is what `uvx agent-intern@latest`
+# installs, so it cannot announce a tag whose upload has not finished (or failed). It is the
+# only network call the server makes on its own; set AGENT_INTERN_NO_UPDATE_CHECK=1 to skip
+# it. A fork that is not on PyPI sets AGY_BRIDGE_REPO to its own GitHub repo instead, and
+# the check then reads that repo's tags. GITHUB_REPO also names where the release notes live.
+PYPI_JSON_URL = "https://pypi.org/pypi/agent-intern/json"
+_FORK_REPO = os.environ.get("AGY_BRIDGE_REPO") or None
+GITHUB_REPO = _FORK_REPO or "SinanTufekci/agent-intern"
 
 AGY_DATA = Path.home() / ".gemini" / "antigravity-cli"
 LAST_CONVERSATIONS = AGY_DATA / "cache" / "last_conversations.json"
@@ -731,6 +736,21 @@ _AGY_LOCK = threading.Lock()
 # Latest agy version the bridge's state-file assumptions were verified against.
 # Newer agy releases may change paths/schemas (the SQLite migration is the known
 # risk), so we warn at startup if the installed agy is newer than this.
+#
+# 1.5.8 re-verification (live, Windows, 2026-11-13): five releases from 1.5.3, no
+# break. Ask and continue in the same conversation on gemini-3.8-flash-high, a
+# watched ask (the viewer state carried the model), `--model gemini-4-hydrogen`
+# (base name) and `--model gemini-4-hydrogen-high`, and a two-worker read-only swarm
+# on gemini-4-hydrogen-high all answered. The DRIFT is the catalog: a
+# gemini-4-hydrogen family (low, medium, high, xhigh) and
+# gemini-pro-orchestrator-g1-pro ("Orchestrator (Argon)") are new in `agy models`;
+# the 1.5.8 changelog lists Hydrogen only for API-key / ADC / gateway sign-ins, yet
+# an AI Pro login lists and answers it. The orchestrator slug was NOT called.
+# 1.5.7 made headless `-p` start in Auto agent mode (it held with
+# --dangerously-skip-permissions). Not re-checked on 1.5.8: an image, plan mode
+# with a tool call, `schema`, the default model in a clean HOME (this machine's
+# settings.json pins Gemini 4 Argon (High)). Host loads held: a fresh Claude Code
+# session (29 tools) and a fresh agy session (32), each answering an ask.
 #
 # 1.5.3 re-verification (live, Windows, 2026-11-09, feat/0.36): ask, continue, an
 # image, a two-worker swarm and a cut-short turn (the 1.5.0 exit-3 timeout) held;
@@ -820,7 +840,7 @@ _AGY_LOCK = threading.Lock()
 # transcript and status went green -- so an empty newest-conversation is a stale
 # artifact, not a regression. (Issue #8: the row now skips such conversations, and
 # ones still running or whose turn failed; see _transcript_status_row.)
-VERIFIED_AGY_VERSION = (1, 5, 3)
+VERIFIED_AGY_VERSION = (1, 5, 8)
 
 # First agy version whose print mode understands `--output-format json` (1.1.8).
 # Below this the flag is unknown to agy's parser, so the bridge must not pass it
@@ -905,26 +925,40 @@ def _debug_enabled() -> bool:
     return _env_truthy("AGY_BRIDGE_DEBUG")
 
 
-def _fetch_latest_release_version() -> Optional[tuple[int, int, int]]:
-    """Best-effort: the highest semver tag published on GITHUB_REPO, or None.
+def _update_check_disabled() -> bool:
+    """True if the update check is switched off. AGENT_INTERN_NO_UPDATE_CHECK is the
+    name; AGY_BRIDGE_NO_UPDATE_CHECK, what it was called before, still works."""
+    return _env_truthy("AGENT_INTERN_NO_UPDATE_CHECK") or _env_truthy("AGY_BRIDGE_NO_UPDATE_CHECK")
 
-    Hits GitHub's public tags API (no auth) with a short timeout. ANY failure —
-    offline, DNS, rate-limit, HTTP error, unexpected JSON — returns None so the
-    server never blocks or errors on the network at startup.
-    """
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=100"
+
+def _http_json(url: str):
+    """GET `url` and decode the JSON body, or None on ANY failure (offline, DNS,
+    rate limit, HTTP error, bad JSON): the update check must never block or raise."""
     req = urllib.request.Request(
         url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "agent-intern-bridge",
-        },
+        headers={"Accept": "application/json", "User-Agent": "agent-intern-bridge"},
     )
     try:
         with urllib.request.urlopen(req, timeout=4) as resp:
-            tags = json.load(resp)
+            return json.load(resp)
     except (urllib.error.URLError, OSError, ValueError, TimeoutError):
         return None
+
+
+def _latest_on_pypi() -> Optional[tuple[int, int, int]]:
+    """The newest release PyPI serves for agent-intern (its `info.version`, which
+    PyPI keeps free of pre-releases and yanked files), or None."""
+    body = _http_json(PYPI_JSON_URL)
+    if not isinstance(body, dict):
+        return None
+    info = body.get("info")
+    version = info.get("version") if isinstance(info, dict) else None
+    return _parse_agy_version(version) if isinstance(version, str) else None
+
+
+def _latest_github_tag() -> Optional[tuple[int, int, int]]:
+    """The highest semver tag on GITHUB_REPO (a fork that is not on PyPI), or None."""
+    tags = _http_json(f"https://api.github.com/repos/{GITHUB_REPO}/tags?per_page=100")
     if not isinstance(tags, list):  # e.g. a {"message": "rate limit"} error body
         return None
     versions = [
@@ -933,6 +967,39 @@ def _fetch_latest_release_version() -> Optional[tuple[int, int, int]]:
         if v is not None
     ]
     return max(versions) if versions else None
+
+
+# How long a lookup is remembered. A server process lives as long as its host session and
+# every *_status call asks, so without this each one would pay a network round trip (and
+# GitHub's tag list allows an address 60 anonymous calls an hour). A miss is remembered
+# briefly so being offline does not cost a 4 s timeout on every call either.
+_LATEST_TTL_S = 6 * 60 * 60
+_LATEST_MISS_TTL_S = 10 * 60
+_latest_cache: Optional[tuple[float, Optional[tuple[int, int, int]]]] = None
+_latest_lock = threading.Lock()
+
+
+def _fetch_latest_release_version() -> Optional[tuple[int, int, int]]:
+    """Best-effort: the newest published agent-intern release, or None.
+
+    PyPI by default, the fork's GitHub tags when AGY_BRIDGE_REPO is set. Cached for
+    _LATEST_TTL_S (a failed lookup for _LATEST_MISS_TTL_S). ANY failure returns None.
+    """
+    global _latest_cache
+    with _latest_lock:
+        now = time.monotonic()
+        if _latest_cache is not None:
+            fetched_at, value = _latest_cache
+            if now - fetched_at < (_LATEST_TTL_S if value is not None else _LATEST_MISS_TTL_S):
+                return value
+        value = _latest_github_tag() if _FORK_REPO else _latest_on_pypi()
+        _latest_cache = (time.monotonic(), value)
+        return value
+
+
+def _release_notes_url(version: tuple[int, int, int]) -> str:
+    """Where the notes for `version` are: its GitHub release."""
+    return f"https://github.com/{GITHUB_REPO}/releases/tag/v{'.'.join(map(str, version))}"
 
 
 def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
@@ -954,9 +1021,10 @@ def _update_warning(latest: Optional[tuple[int, int, int]]) -> Optional[str]:
     newest = ".".join(map(str, latest))
     return (
         f"A newer Agent Intern bridge is available: v{newest} "
-        f"(you are running v{__version__}). Upgrade with `uvx agent-intern@latest`, "
-        "or `git pull` if you installed from source, then restart Claude Code. "
-        "Set AGY_BRIDGE_NO_UPDATE_CHECK=1 to silence this."
+        f"(you are running v{__version__}). What changed: {_release_notes_url(latest)} . "
+        "Upgrade with `uvx agent-intern@latest --version` (or change the pinned version, "
+        "or `git pull` if you installed from source), then restart your MCP host. "
+        "Set AGENT_INTERN_NO_UPDATE_CHECK=1 to silence this."
     )
 
 
@@ -1082,7 +1150,7 @@ def _startup_checks() -> None:
     """Warn (once, at startup) about a stale agy or a newer bridge release.
 
     Both checks are best-effort and non-fatal: the agy check runs `agy --version`
-    locally; the update check polls GitHub (skipped via AGY_BRIDGE_NO_UPDATE_CHECK,
+    locally; the update check asks PyPI (skipped via AGENT_INTERN_NO_UPDATE_CHECK,
     silent on any network failure).
     """
     if _UNKNOWN_BACKENDS:
@@ -1090,7 +1158,7 @@ def _startup_checks() -> None:
     agy_warning = _compat_warning(_parse_agy_version(_get_agy_version() or ""))
     if agy_warning:
         log.warning(agy_warning)
-    if not _env_truthy("AGY_BRIDGE_NO_UPDATE_CHECK"):
+    if not _update_check_disabled():
         update_warning = _update_warning(_fetch_latest_release_version())
         if update_warning:
             log.warning(update_warning)
@@ -1533,12 +1601,12 @@ def _bridge_version_status() -> tuple[str, bool, str]:
 
     Always reports ok=True — an available update is informational, not a fault, so
     it must not flip the overall status to PROBLEMS FOUND. Honors
-    AGY_BRIDGE_NO_UPDATE_CHECK and stays ok (just uninformative) when GitHub is
+    AGENT_INTERN_NO_UPDATE_CHECK and stays ok (just uninformative) when PyPI is
     unreachable. This is what surfaces the update notice in an MCP client's chat
     (the startup stderr warning only lands in the host's logs).
     """
     label = "bridge version"
-    if _env_truthy("AGY_BRIDGE_NO_UPDATE_CHECK"):
+    if _update_check_disabled():
         return (label, True, f"v{__version__} (update check disabled)")
     latest = _fetch_latest_release_version()
     if latest is None:
@@ -1549,7 +1617,8 @@ def _bridge_version_status() -> tuple[str, bool, str]:
         return (
             label,
             True,
-            f"v{__version__} -> v{newest} available; upgrade: uvx agent-intern@latest",
+            f"v{__version__} -> v{newest} available; upgrade: uvx agent-intern@latest --version, "
+            f"then restart your MCP host (what changed: {_release_notes_url(latest)})",
         )
     return (label, True, f"v{__version__} (latest)")
 
@@ -1683,8 +1752,8 @@ def _collect_status() -> list[tuple[str, bool, str]]:
     Spends no AI Pro quota: runs `agy --version`, asks agy for its own quota table
     (`-p "/usage"`, answered by the CLI without an agent turn on 1.1.11+ — see
     _quota_status_rows), inspects local state files, and (unless
-    AGY_BRIDGE_NO_UPDATE_CHECK is set) makes one best-effort GitHub call to report
-    whether a newer bridge release exists.
+    AGENT_INTERN_NO_UPDATE_CHECK is set) makes one best-effort PyPI call (remembered for
+    hours) to report whether a newer bridge release exists.
     """
     return _bridge_status_rows() + _agy_status_rows()
 
@@ -2942,7 +3011,15 @@ def _run_agy_watched(
         # transcript: stream-json describes only the CURRENT run, and prior turns are
         # history. It is cosmetic and already degrades to [] when unreadable.
         history = _read_agy_history(pinned_conv) if (continue_conv and pinned_conv) else []
-        rid = _watch_begin(title, start, timeout_s, prompt=prompt, history=history)
+        # A call without `model` runs on settings.json's model (see _agy_settings_model).
+        rid = _watch_begin(
+            title,
+            start,
+            timeout_s,
+            prompt=prompt,
+            history=history,
+            model=model or _agy_settings_model() or "",
+        )
         stream = _StreamWatch(rid, start) if use_stream else None
         feed = None if use_stream else _WatchFeed(pinned_conv, start, rid)
         try:
@@ -3106,7 +3183,9 @@ def _run_agy_image_watched(
         title = display_prompt.strip().splitlines()[0] if display_prompt.strip() else "image"
         if len(title) > 200:
             title = title[:200].rsplit(" ", 1)[0] + "…"
-        rid = _watch_begin(title, start, timeout_s, prompt=display_prompt)
+        rid = _watch_begin(
+            title, start, timeout_s, prompt=display_prompt, model=_agy_settings_model() or ""
+        )
         stream = _StreamWatch(rid, start) if use_stream else None
         feed = None if use_stream else _WatchFeed(None, start, rid)
         try:
